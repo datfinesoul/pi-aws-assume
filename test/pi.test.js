@@ -86,7 +86,7 @@ async function setup(t, { mode = "tui", dependency = true, trusted = true,
   const count = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").length : 0;
   const shell = (command) => tool("aws_bash").execute("test-shell", { command }, undefined, undefined, ctx);
   await emit("session_start", { reason: "startup" });
-  assert.ok(!notices.some((text) => /newer than the last tested/.test(text)), "supported newer Pi versions must not warn");
+  assert.ok(!notices.some((text) => /Pi version|Requires Pi|major version/.test(text)), "supported Pi versions must not notify");
   t.after(async () => { await emit("session_shutdown"); });
   return { cwd, configPath, log, emit, tool, call, metadata, count, shell, notices, widgets, ctx, ext,
     prompts: () => prompts, deny: () => { allow = false; } };
@@ -99,9 +99,9 @@ test("Pi loads the extension without session-side effects", { skip: !entry }, as
   assert.equal(env.tool("bash"), undefined);
   assert.equal(env.count(), 0);
   assert.equal((await env.metadata()).available, false);
-  assert.match((await env.metadata()).reason, /disabled outside interactive/);
+  assert.match((await env.metadata()).reason, /Only interactive terminal mode/);
   assert.match((await env.emit("before_agent_start"))[0].message.content, /role access is unavailable/);
-  await assert.rejects(env.call("assume", "test-a"), /disabled outside interactive/);
+  await assert.rejects(env.call("assume", "test-a"), /Only interactive terminal mode/);
 });
 
 test("missing Granted notifies and leaves shell/guards untouched", { skip: !entry || process.platform !== "darwin" }, async (t) => {
@@ -118,7 +118,7 @@ test("missing Granted notifies and leaves shell/guards untouched", { skip: !entr
 test("untrusted project remains inert", { skip: !entry }, async (t) => {
   const env = await setup(t, { trusted: false });
   assert.equal(env.tool("assume_profile").exposure, "model-only");
-  assert.match((await env.metadata()).reason, /requires project trust/);
+  assert.match((await env.metadata()).reason, /project is not trusted/);
   assert.equal(env.tool("aws_bash").exposure, "hidden");
   assert.equal(env.tool("bash"), undefined);
   assert.equal(env.count(), 0);
@@ -147,11 +147,18 @@ for (const [label, options] of [["missing", { writePolicy: false }], ["empty", {
     assert.match(reminder, /role access is unavailable/);
     assert.match(reminder, /search credential stores/);
     assert.match(reminder, /not to define a shell alias/);
+    assert.match(reminder, /aws_bash is not provided/);
+    assert.doesNotMatch(reminder, /Use assume_profile and aws_bash only/);
+    assert.doesNotMatch(reminder, /assume: /);
     assert.deepEqual(await env.emit("before_agent_start"), [undefined]);
     for (const action of ["list", "clear", "cancel"]) await assert.rejects(env.call(action), /no AWS profile policy/);
     await assert.rejects(env.shell("echo must-not-run"), /no AWS profile policy/);
-    await env.ext.commands.get("assume").handler("status", env.ctx);
-    assert.match(env.notices.at(-1), /no AWS profile policy/);
+    for (const action of ["status", "list", "clear", "some-profile"]) {
+      await env.ext.commands.get("assume").handler(action, env.ctx);
+      assert.match(env.notices.at(-1), /^assume: role access is unavailable\. This project has no AWS profile policy/);
+      assert.doesNotMatch(env.notices.at(-1), /Never probe|shell alias|ambient credentials|"guidance"/);
+    }
+    await assert.rejects(env.call("list"), /Never probe for it/);
     await assert.rejects(env.call("assume", "test-a"), /no AWS profile policy/);
     assert.equal(env.count(), 0);
   });
@@ -184,7 +191,7 @@ test("global rules apply only by project-selected ID", {
   writeFileSync(globalPath, "FAKE_SECRET");
   await env.emit("session_start", { reason: "reload" });
   assert.equal(env.tool("aws_bash").exposure, "hidden");
-  assert.ok(env.notices.some((text) => /^assume: Global aws-assume\.json/.test(text)));
+  assert.ok(env.notices.some((text) => /^assume: role access is unavailable\. Global aws-assume\.json/.test(text)));
   assert.ok(!env.notices.join("\n").includes("FAKE_SECRET"));
 });
 

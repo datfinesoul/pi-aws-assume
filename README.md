@@ -18,7 +18,7 @@ Requirements:
 - **Interactive Pi 1.x, version 1.2.0 or newer.** See [Pi version compatibility](#pi-version-compatibility).
 - **macOS.** Role access in this alpha does not support Linux or JSON, print, and RPC modes. Status diagnostics remain available wherever the extension loads.
 
-In a project with a policy, startup checks for Granted without invoking it. If missing, the extension notifies once and stays inactive.
+In a project with a policy, startup checks for Granted without invoking it. If missing, the extension notifies once and role access stays unavailable; status diagnostics remain.
 
 ### Global installation
 
@@ -63,7 +63,7 @@ pi --no-extensions --extension ./extensions/aws-assume/index.ts
 
 ## Usage
 
-Create your project policy as described in [Configuration](#configuration), then `/reload`. Without project rules or selected global rules, `/assume` only explains that the extension is inactive.
+Create your project policy as described in [Configuration](#configuration), then `/reload`. Without project rules or selected global rules, `/assume status` explains why role access is unavailable and other `/assume` actions refuse.
 
 | User command | Behavior |
 |---|---|
@@ -199,10 +199,9 @@ Pi does not check extension compatibility when updating packages, so the extensi
 
 | Running Pi | Behavior |
 |---|---|
-| Older than 1.2.0 | Inactive, with a notice. |
-| 1.2.0 up to the last tested 1.x version | Active. |
-| A newer 1.x version | Active, without a version warning. |
-| A different major version, or an unknown version | Inactive, with a notice, until pi-aws-assume is updated. |
+| Older than 1.2.0 | Role access unavailable, with a notice. |
+| Any 1.x version from 1.2.0 | Role access available, without a version notice. |
+| A different major version, or an unknown version | Role access unavailable, with a notice, until pi-aws-assume is updated. |
 
 To control when the extension updates, install a pinned tag or npm version instead of the default branch.
 

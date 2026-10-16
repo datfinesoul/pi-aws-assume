@@ -16,7 +16,9 @@ import { formatLocalExpiration } from "../../src/status.js";
 import { checkPiVersion, isUsableVersion } from "../../src/version.js";
 
 const AWS_BASH = "aws_bash";
-const NO_POLICY = "assume: this project has no AWS profile policy (.pi/aws-assume.json), or it defines no rules and selects no global rule IDs. Role access is unavailable; plain bash is unchanged. The user must create the policy outside Pi and /reload. See pi-aws-assume's README.md.";
+// Reasons are plain sentences shared by user notices and model-facing output.
+const NO_POLICY = "This project has no AWS profile policy (.pi/aws-assume.json), or it defines no rules and selects no global rule IDs. Create the policy outside Pi, then /reload. See pi-aws-assume's README.md.";
+// Model-facing only; never shown in user notices.
 const SAFETY_GUIDANCE = "assume_profile is a Pi extension tool, not a shell command, function, or alias. Never probe for it with bash/type/which or search shell startup files. If its tool declaration is unavailable, report that the Pi tool is unavailable; ask the user to check extension loading and /reload, not to define a shell alias. If the task requires an assumed profile and role access or authentication is unavailable, stop and report the blocker. Do not fall back to ambient credentials, search credential stores, invoke AWS/Granted directly to obtain credentials, or modify project/global AWS policy or AWS profile files. The user manages setup outside Pi, then /reload. Plain bash otherwise keeps the ambient AWS environment. This is guidance, not a sandbox.";
 // Namespace access: an older Pi without this export must not fail at import time.
 const piVersion = (piAgent as { VERSION?: unknown }).VERSION;
@@ -37,7 +39,7 @@ function statusSummary(current: RoleSession) {
 export default function assumeExtension(pi: ExtensionAPI) {
   let session: RoleSession | undefined;
   let guards: ReturnType<typeof createGuards> | undefined;
-  let reason = "Role functionality has not started.";
+  let reason = "The session has not started.";
   let announced: string | undefined;
   let hasAssumed = false;
 
@@ -59,8 +61,13 @@ export default function assumeExtension(pi: ExtensionAPI) {
       },
     }) : undefined);
   };
-  const requireSession = (ctx: ExtensionContext) => {
-    if (ctx.mode !== "tui" || !ctx.isProjectTrusted() || !session) throw new AssumeError(`${reason} ${SAFETY_GUIDANCE}`);
+  const unavailable = () => `assume: role access is unavailable. ${reason}`;
+  // Tool errors carry model guidance; command errors stay short for the user.
+  const requireSession = (ctx: ExtensionContext, audience: "model" | "user") => {
+    if (ctx.mode !== "tui" || !ctx.isProjectTrusted() || !session) {
+      throw new AssumeError(audience === "model" ? `Role access is unavailable. ${reason} ${SAFETY_GUIDANCE}`
+        : unavailable());
+    }
     return session;
   };
   const result = (metadata: object) => ({
@@ -82,7 +89,7 @@ export default function assumeExtension(pi: ExtensionAPI) {
         if (params.action === "status" && !session) {
           return result({ available: false, reason, guidance: SAFETY_GUIDANCE });
         }
-        const current = requireSession(ctx);
+        const current = requireSession(ctx, "model");
         try {
           if (params.action === "assume") {
             if (!params.profile) throw new AssumeError("Specify a profile to assume.");
@@ -107,7 +114,7 @@ export default function assumeExtension(pi: ExtensionAPI) {
       name: AWS_BASH, label: "AWS bash", exposure: "hidden" as const,
       description: "Inactive AWS profile shell.",
       parameters: Type.Object({ command: Type.String() }),
-      async execute() { throw new AssumeError(reason); },
+      async execute() { throw new AssumeError(`Role access is unavailable. ${reason} ${SAFETY_GUIDANCE}`); },
     };
   }
   const deactivate = () => {
@@ -127,11 +134,11 @@ export default function assumeExtension(pi: ExtensionAPI) {
     deactivate();
     updateStatus(ctx);
 
-    reason = "assume is disabled outside interactive terminal mode.";
+    reason = "Only interactive terminal mode is supported.";
     if (ctx.mode !== "tui") return;
     const version = checkPiVersion(piVersion);
-    if (!isUsableVersion(version)) { reason = version.message; ctx.ui.notify(reason, "warning"); return; }
-    reason = "assume requires project trust.";
+    if (!isUsableVersion(version)) { reason = version.message; ctx.ui.notify(unavailable(), "warning"); return; }
+    reason = "The project is not trusted.";
     if (!ctx.isProjectTrusted()) return;
 
     // No effective rules means no role access, discovery, or guards; diagnostics remain visible.
@@ -146,18 +153,18 @@ export default function assumeExtension(pi: ExtensionAPI) {
       });
     }
     catch (error) {
-      reason = error instanceof Error ? `assume: ${error.message}` : "assume: cannot load the policy; no profiles are allowed.";
-      ctx.ui.notify(reason, "error");
+      reason = error instanceof Error ? error.message : "Cannot load the policy; no profiles are allowed.";
+      ctx.ui.notify(unavailable(), "error");
       return;
     }
     reason = NO_POLICY;
     if (!patterns.length) return;
 
-    reason = "assume MVP currently supports macOS only.";
-    if (process.platform !== "darwin") { ctx.ui.notify(reason, "warning"); return; }
+    reason = "Only macOS is supported in this alpha.";
+    if (process.platform !== "darwin") { ctx.ui.notify(unavailable(), "warning"); return; }
     const executable = findGranted();
-    reason = "Granted is not installed/on PATH. assume is inactive; no installation or fallback was attempted.";
-    if (!executable) { ctx.ui.notify(reason, "warning"); return; }
+    reason = "Granted is not installed or not on PATH; no installation or fallback was attempted.";
+    if (!executable) { ctx.ui.notify(unavailable(), "warning"); return; }
 
     const settings = pi.getSettings();
     const shellOptions = { shellPath: settings.shellPath, commandPrefix: settings.shellCommandPrefix };
@@ -269,12 +276,12 @@ export default function assumeExtension(pi: ExtensionAPI) {
 
   // Awareness is independent of authorization, including unsupported modes and missing policy.
   pi.on("before_agent_start", () => {
-    const state = session ? `active /assume profile is ${session.status().activeProfile ?? "none"}`
-      : `role access is unavailable: ${reason} Use assume_profile action=status for diagnostics`;
+    const state = session
+      ? `active /assume profile is ${session.status().activeProfile ?? "none"}. Use assume_profile and aws_bash only when the user or task clearly requires one of this project's allowed profiles; when unclear, do not use them.`
+      : `role access is unavailable and aws_bash is not provided. Reason: ${reason} Use assume_profile action=status for diagnostics.`;
     if (announced === state) return;
     announced = state;
-    return { message: { customType: "assume-context", display: false,
-      content: `AWS context: ${state}. Use assume_profile and aws_bash only when the user or task clearly requires one of this project's allowed profiles; when unclear, do not use them. ${SAFETY_GUIDANCE}` } };
+    return { message: { customType: "assume-context", display: false, content: `AWS context: ${state} ${SAFETY_GUIDANCE}` } };
   });
 
   pi.registerCommand("assume", {
@@ -286,10 +293,10 @@ export default function assumeExtension(pi: ExtensionAPI) {
     async handler(args, ctx) {
       try {
         if (args.trim() === "status" && !session) {
-          ctx.ui.notify(JSON.stringify({ available: false, reason, guidance: SAFETY_GUIDANCE }, null, 2), "info");
+          ctx.ui.notify(unavailable(), "info");
           return;
         }
-        const current = requireSession(ctx);
+        const current = requireSession(ctx, "user");
         const input = args.trim();
         const listing = /^list(?:\s+(\d+))?$/.exec(input);
         if (input === "cancel") {
