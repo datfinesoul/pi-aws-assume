@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { StringEnum } from "@earendil-works/pi-ai";
 import * as piAgent from "@earendil-works/pi-coding-agent";
 import { BorderedLoader, createBashToolDefinition, createLocalBashOperations } from "@earendil-works/pi-coding-agent";
@@ -15,7 +16,7 @@ import { formatLocalExpiration } from "../../src/status.js";
 import { checkPiVersion, isUsableVersion } from "../../src/version.js";
 
 const AWS_BASH = "aws_bash";
-const NO_POLICY = "assume: this project has no AWS profile policy (.pi/aws-assume.json), or it allows no profiles, so the extension is inactive and plain bash is unchanged. Create the policy yourself outside Pi and /reload. See pi-aws-assume's README.md.";
+const NO_POLICY = "assume: this project has no AWS profile policy (.pi/aws-assume.json), or it defines no rules and selects no global rule IDs, so the extension is inactive and plain bash is unchanged. Create the policy yourself outside Pi and /reload. See pi-aws-assume's README.md.";
 // Namespace access: an older Pi without this export must not fail at import time.
 const piVersion = (piAgent as { VERSION?: unknown }).VERSION;
 
@@ -129,10 +130,17 @@ export default function assumeExtension(pi: ExtensionAPI) {
     reason = "assume requires project trust.";
     if (!ctx.isProjectTrusted()) return;
 
-    // Projects without a policy stay silent and untouched: no tool, guards, reminder, or bash change.
+    // Projects without effective rules stay silent and untouched: no tool, guards, reminder, or bash change.
     const policyPath = join(ctx.cwd, ".pi", "aws-assume.json");
     let patterns: readonly string[] = [];
-    try { patterns = loadPolicy(policyPath); }
+    const globalPolicyPath = join(piAgent.getAgentDir(), "aws-assume.json");
+    try {
+      patterns = loadPolicy({
+        bundledPath: fileURLToPath(new URL("./config.json", import.meta.url)),
+        globalPath: globalPolicyPath,
+        projectPath: policyPath,
+      });
+    }
     catch (error) {
       reason = error instanceof Error ? `assume: ${error.message}` : "assume: cannot load the policy; no profiles are allowed.";
       ctx.ui.notify(reason, "error");
@@ -202,7 +210,8 @@ export default function assumeExtension(pi: ExtensionAPI) {
       if (!outcome.credentials) throw new AssumeError("Role operation cancelled.");
       return outcome.credentials;
     } });
-    const currentGuards = createGuards({ cwd: ctx.cwd, home: homedir(), policyPath });
+    const currentGuards = createGuards({ cwd: ctx.cwd, home: homedir(), policyPath,
+      additionalPolicyPaths: [globalPolicyPath] });
     const local = createLocalBashOperations({ shellPath: settings.shellPath });
     session = current;
     guards = currentGuards;
@@ -262,7 +271,7 @@ export default function assumeExtension(pi: ExtensionAPI) {
     if (announced === active) return;
     announced = active;
     return { message: { customType: "assume-context", display: false,
-      content: `AWS context: active /assume profile is ${active}. Plain bash keeps the ambient AWS environment. Use assume_profile and aws_bash only when the user or task clearly requires one of this project's allowed profiles; when unclear, do not use them. Do not modify the project allowlist. This is not a sandbox.` } };
+      content: `AWS context: active /assume profile is ${active}. Plain bash keeps the ambient AWS environment. Use assume_profile and aws_bash only when the user or task clearly requires one of this project's allowed profiles; when unclear, do not use them. Do not modify project or global AWS policy. This is not a sandbox.` } };
   });
 
   pi.registerCommand("assume", {

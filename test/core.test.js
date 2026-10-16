@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { parsePolicy, loadPolicy, matchesProfilePattern, resolveAllowedProfiles } from "../src/policy.js";
+import { parsePolicyFile, loadPolicy, matchesProfilePattern, resolveAllowedProfiles } from "../src/policy.js";
 import { discoverProfileNames, discoverProfileRegion, parseProfileNames, parseProfileRegion } from "../src/profiles.js";
 import { AssumeError, fetchCredentials, findGranted, parseCredentials, safeMessage, shellEnvironment } from "../src/credentials.js";
 import { createGuards } from "../src/guards.js";
@@ -22,20 +22,24 @@ function temporary(t) {
 function deferred() { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; }
 
 // Policy is explicit; discovery retains only profile section names, never credential values.
+const rules = (...patterns) => patterns.map((pattern, n) => ({ id: `rule-${n}`, pattern }));
+const ownPatterns = (text) => parsePolicyFile(text).profiles.map((rule) => rule.pattern);
 test("policy supports exact names and path-style globs, remains immutable and deny-by-default", (t) => {
-  const profiles = parsePolicy('{"profiles":["dev","production/team:readonly"]}');
-  assert.deepEqual(profiles, ["dev", "production/team:readonly"]);
-  assert.throws(() => profiles.push("admin"));
-  assert.deepEqual(loadPolicy(join(temporary(t), "missing.json")), []);
-  assert.deepEqual(parsePolicy('{"profiles":["glg/*/readonly","glg/**","team-?","*"]}'), ["glg/*/readonly", "glg/**", "team-?", "*"]);
+  const policy = parsePolicyFile(JSON.stringify({ profiles: rules("dev", "production/team:readonly") }));
+  assert.deepEqual(policy.profiles.map((rule) => rule.pattern), ["dev", "production/team:readonly"]);
+  assert.throws(() => policy.profiles.push({ id: "admin", pattern: "admin" }));
+  assert.throws(() => { policy.profiles[0].pattern = "admin"; });
+  const dir = temporary(t);
+  assert.deepEqual(loadPolicy({ bundledPath: join(dir, "b.json"), globalPath: join(dir, "g.json"), projectPath: join(dir, "missing.json") }), []);
+  assert.deepEqual(ownPatterns(JSON.stringify({ profiles: rules("glg/*/readonly", "glg/**", "team-?", "*") })), ["glg/*/readonly", "glg/**", "team-?", "*"]);
 });
 test("malformed or ambiguous policy fails closed without reflecting its content", () => {
-  for (const text of ["FAKE_SECRET", "null", "[]", "{}", '{"profiles":"*"}', '{"profiles":["dev","dev"]}',
-    '{"profiles":["glg/**prod"]}', '{"profiles":["glg/***"]}', '{"profiles":["glg//readonly"]}',
-    '{"profiles":["glg/[ab]"]}', '{"profiles":["glg/{dev,prod}"]}', '{"profiles":["!admin"]}',
-    '{"profiles":["--help"]}', '{"profiles":["dev;whoami"]}',
-    '{"profiles":["dev\\nadmin"]}', '{"profiles":[],"allowAll":true}']) {
-    assert.throws(() => parsePolicy(text), (error) => !error.message.includes("FAKE_SECRET"));
+  const invalid = ["glg/**prod", "glg/***", "glg//readonly", "glg/[ab]", "glg/{dev,prod}", "!admin", "--help", "dev;whoami", "dev\nadmin"];
+  for (const text of ["FAKE_SECRET", "null", "[]", '{"profiles":"*"}', '{"profiles":["dev"]}',
+    '{"profiles":[{"id":"dev","pattern":"dev"},{"id":"dev","pattern":"prod"}]}',
+    ...invalid.map((pattern) => JSON.stringify({ profiles: [{ id: "x", pattern }] })),
+    '{"profiles":[],"allowAll":true}', '{"profiles":[{"id":"x","pattern":"x","note":"FAKE_SECRET"}]}']) {
+    assert.throws(() => parsePolicyFile(text), (error) => !error.message.includes("FAKE_SECRET"));
   }
 });
 test("path globs are whole-name, case-sensitive, slash-aware, and literal outside * and ?", () => {
@@ -320,7 +324,10 @@ test("file guards cover credential stores, policy writes, and symlink aliases", 
   const guard = createGuards({ cwd, home, policyPath: join(cwd, ".pi/aws-assume.json"), env: {} });
   assert.ok(guard.file("read", "~/\.aws/credentials"));
   assert.ok(guard.file("write", "alias/new-config"));
-  assert.ok(guard.file("edit", ".pi/aws-assume.json"));
+  const guidance = guard.file("edit", ".pi/aws-assume.json");
+  assert.match(guidance, new RegExp(`requires you to make this change yourself in ${join(cwd, ".pi/aws-assume.json")}:.*code snippet.*/reload`));
+  assert.match(guidance, /Never include credentials/);
+  assert.match(guard.file("write", "alias/new-config"), /make this change yourself in .*new-config/);
   assert.equal(guard.file("write", "extensions/aws-assume/index.ts"), undefined);
   assert.equal(guard.file("read", ".pi/aws-assume.json"), undefined);
   assert.equal(guard.file("write", "src/app.js"), undefined);
@@ -338,6 +345,23 @@ test("shell guards reject common profile bypasses but do not block STS or region
     "ls node_modules/.aws-sdk"]) assert.equal(guard.shell(command), undefined, command);
   for (const command of ["echo hi && granted sso login", "x=$(granted token)", "sudo granted sso login", "ls ~/.aws"]) {
     assert.ok(guard.shell(command), command);
+  }
+});
+test("shell guards reject project/global policy and custom AWS file paths in common spellings", () => {
+  const guard = createGuards({ cwd: "/work", home: "/home/example", policyPath: "/work/.pi/aws-assume.json",
+    additionalPolicyPaths: ["/home/example/.pi/agent/aws-assume.json"],
+    env: { AWS_CONFIG_FILE: "/home/example/custom/aws-config" } });
+  for (const command of ["cat /home/example/.pi/agent/aws-assume.json", "cat ~/.pi/agent/aws-assume.json",
+    "echo x > $HOME/.pi/agent/aws-assume.json", "cat ${HOME}/.pi/agent/aws-assume.json",
+    "cat \"$PI_CODING_AGENT_DIR/aws-assume.json\"", "cd ~/.pi/agent && cat aws-assume.json", "cat .pi/aws-assume.json",
+    "cat ~/custom/aws-config", "cat $HOME/custom/aws-config", "cat /home/example/custom/aws-config"]) {
+    assert.ok(guard.shell(command), command);
+  }
+  assert.match(guard.shell("cd ~/.pi/agent && cat aws-assume.json"),
+    /read tool.*yourself in \/work\/\.pi\/aws-assume\.json or \/home\/example\/\.pi\/agent\/aws-assume\.json:.*code snippet/);
+  assert.doesNotMatch(guard.shell("cat ~/custom/aws-config"), /yourself in/);
+  for (const command of ["cat ~/.pi/agent/settings.json", "ls ~/custom"]) {
+    assert.equal(guard.shell(command), undefined, command);
   }
 });
 test("Granted executable discovery only finds real executable files", (t) => {
