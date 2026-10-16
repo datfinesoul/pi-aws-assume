@@ -30,7 +30,7 @@ export function checkPiVersion(version, { min = MIN_PI_VERSION, tested = TESTED_
     return { status: "older", message: `aws-assume: requires Pi ${min} or newer (running ${shown}); the extension is inactive.` };
   }
   if (compare(current, latest) > 0) {
-    return { status: "newer", message: `aws-assume: Pi ${shown} is newer than the last tested version (${tested}); continuing, but report problems.` };
+    return { status: "newer", message: "" };
   }
   return { status: "ok", message: "" };
 }

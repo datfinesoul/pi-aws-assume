@@ -5,7 +5,7 @@
 A [Pi](https://github.com/earendil-works/pi) extension that uses [Granted](https://github.com/fwdcloudsec/granted) to run assistant commands with temporary AWS IAM Identity Center credentials. Each project allowlists existing profiles; the assistant asks for approval once per concrete profile per session.
 
 > [!IMPORTANT]
-> - **Opt-in per project.** `.pi/aws-assume.json` must define rules or select global rule IDs before AWS tools and guards become available.
+> - **Opt-in per project.** `.pi/aws-assume.json` must define rules or select global rule IDs before role access, `aws_bash`, and guards become available. `assume_profile` remains visible for setup diagnostics without granting access.
 > - **Separate shell tool.** Assumed credentials apply only to `aws_bash`. Plain `bash` is unchanged and keeps your ambient AWS credentials and profiles.
 > - **Explicit use.** The assistant is instructed to use `aws_bash` only when the user or task clearly requires an allowed `/assume` profile; otherwise it uses plain `bash`.
 > - **Not a credential sandbox.** The allowlist and approval do not restrict plain `bash` or other execution tools. Read the [known limitations](#known-limitations).
@@ -16,7 +16,7 @@ Requirements:
 
 - **[Granted CLI](https://github.com/fwdcloudsec/granted)** installed and on Pi's `PATH`, with your IAM Identity Center profiles already configured. Follow [Granted's setup guide](https://docs.granted.dev/getting-started) first; this extension does not install it or replace its authentication.
 - **Interactive Pi 1.x, version 1.2.0 or newer.** See [Pi version compatibility](#pi-version-compatibility).
-- **macOS.** This alpha does not support Linux or JSON, print, and RPC modes.
+- **macOS.** Role access in this alpha does not support Linux or JSON, print, and RPC modes. Status diagnostics remain available wherever the extension loads.
 
 In a project with a policy, startup checks for Granted without invoking it. If missing, the extension notifies once and stays inactive.
 
@@ -38,7 +38,7 @@ Pi records the package in `.pi/settings.json`.
 
 Project packages load only after project trust. Run `/reload` or start a new session after installation.
 
-Installation scope and [configuration](#configuration) are independent: either installation reads the trusted working project's policy and any global rules it selects. A global installation or rule library alone never activates the extension.
+Installation scope and [configuration](#configuration) are independent: either installation reads the trusted working project's policy and any global rules it selects. A global installation or rule library alone never enables role access.
 
 > [!NOTE]
 > Pi identifies a package by where it was installed from. Installing pi-aws-assume globally and for a project from the same source is fine: the project installation replaces the global one. Installing it from different locations, such as GitHub globally and a local checkout for a project, loads both copies, and Pi does not reconcile them.
@@ -75,7 +75,9 @@ Create your project policy as described in [Configuration](#configuration), then
 | `/assume cancel` | Cancel pending authentication and queued role work without clearing the previously active credentials or per-session approvals. |
 | `/assume clear` | Clear active credentials and cancel pending authentication. Existing per-session approvals remain. |
 
-For assistant-driven use, `assume_profile` selects the profile and `aws_bash` runs the commands. Both are model-only tools, available only with a usable project policy. Neither is callable through codemode scripts, because they can open approval or authentication dialogs.
+For assistant-driven use, `assume_profile` selects the profile and `aws_bash` runs the commands. Both are model-only tools. `assume_profile` stays visible even without usable setup: `status` returns `available: false`, a reason, and safety guidance; all other actions refuse until prerequisites pass. `aws_bash` is exposed only when role access is enabled. Neither is callable through codemode scripts, because they can open approval or authentication dialogs.
+
+`assume_profile` is a Pi extension tool, not a shell command, function, or alias. The assistant must not run `type`/`which` or search shell startup files to locate it. If the declaration is absent, report a Pi tool-loading/activation problem and ask the user to check loading and `/reload`; do not ask for a shell alias.
 
 - `assume_profile` accepts an `action`: `list`, `status`, `assume`, `cancel`, or `clear`. `assume` requires a concrete `profile`, never a wildcard. `list` accepts an optional integer `offset` and returns up to 100 names, `totalProfiles`, and `nextOffset`. The picker and completions show all discovered matches.
 - `aws_bash` takes the same input as `bash` and uses Pi's configured shell and command prefix. Without an active profile, it refuses to run rather than falling back to ambient credentials.
@@ -100,7 +102,7 @@ All files define `profiles` as `{ "id", "pattern" }` rules. A project's own rule
 
 **Unlike the automatic configuration merging used by [other datfinesoul Pi extensions](https://github.com/datfinesoul?tab=repositories&q=topic%3Api-extension&type=&language=&sort=), this allowlist requires explicit project selection.** New global rule IDs never widen an existing project's access. The global file cannot opt projects in.
 
-A missing or empty project policy leaves the extension inactive, regardless of global rules. Policy loads at session start or `/reload`, not when files change. Invalid or unreadable participating files fail the whole policy closed, with a notice identifying the file's layer but not its contents. Undefined global IDs and conflicts between selected and project rule IDs are invalid.
+A missing or empty project policy disables role access, regardless of global rules, but does not hide status diagnostics or model-facing safety guidance. Policy loads at session start or `/reload`, not when files change. Invalid or unreadable participating files fail the whole policy closed, with a notice identifying the file's layer but not its contents. Undefined global IDs and conflicts between selected and project rule IDs are invalid.
 
 The extension never writes policies, AWS profiles, or global Pi settings. Granted has its own side effects; see [Credentials and refresh](#credentials-and-refresh).
 
@@ -185,7 +187,7 @@ Unknown fields, other value types, and invalid rules fail the whole policy close
 
 - **Project opt-in.** A trusted project must define or select rules in `.pi/aws-assume.json`. Global installation alone grants no access through the extension.
 - **Separate credential scope.** Only `aws_bash` receives the selected temporary credentials, after inherited AWS identity variables are removed. Plain `bash` retains ambient credentials and access to other host credential sources.
-- **Model guidance, not enforcement.** Tool descriptions and a hidden context reminder tell the assistant when to use the AWS tools. They cannot force that choice.
+- **Awareness without authorization.** Status diagnostics and a model-facing context reminder remain available when role access is disabled. If a task requires an assumed profile but setup or authentication is unavailable, the assistant must stop and report the blocker, not fall back to ambient credentials, search credential stores, invoke AWS/Granted directly to obtain credentials, or edit AWS policy/profile files. The user handles setup outside Pi and runs `/reload`. Unrelated tasks may still use plain `bash` with its ambient environment. This guidance is not technical enforcement.
 - **Region order in `aws_bash`.** An inherited `AWS_REGION`, then an inherited `AWS_DEFAULT_REGION`, then the selected profile's `region` in your AWS config file, then `us-east-1`. A CLI `--region` or explicit SDK region still wins. An inherited region therefore applies to every selected profile.
 - **Memory-only state.** The extension never persists credentials or approvals and never automatically reactivates a role. Granted's own cache is separate.
 - **macOS, Granted, interactive mode.** Other platforms, credential tools, and non-interactive modes are out of scope for this alpha.
@@ -199,14 +201,14 @@ Pi does not check extension compatibility when updating packages, so the extensi
 |---|---|
 | Older than 1.2.0 | Inactive, with a notice. |
 | 1.2.0 up to the last tested 1.x version | Active. |
-| A newer 1.x version | Active, with a one-time warning per session that the version is untested. |
+| A newer 1.x version | Active, without a version warning. |
 | A different major version, or an unknown version | Inactive, with a notice, until pi-aws-assume is updated. |
 
 To control when the extension updates, install a pinned tag or npm version instead of the default branch.
 
 ### Components
 
-The extension registers `/assume`, model-only AWS tools, session hooks, the status widget, and best-effort tool-call guards. `aws_bash` reuses Pi's bash implementation. A hidden AWS context reminder is added before the next agent run when the active profile changes; session shutdown or replacement clears role state.
+The extension registers `/assume`, model-only AWS tools, session hooks, the status widget, and best-effort tool-call guards. `aws_bash` reuses Pi's bash implementation. A model-facing AWS context reminder is added before the next agent run when availability or the active profile changes, including when setup is missing; session shutdown or replacement clears role state.
 
 ### Profile discovery
 

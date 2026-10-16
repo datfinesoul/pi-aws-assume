@@ -86,6 +86,7 @@ async function setup(t, { mode = "tui", dependency = true, trusted = true,
   const count = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").length : 0;
   const shell = (command) => tool("aws_bash").execute("test-shell", { command }, undefined, undefined, ctx);
   await emit("session_start", { reason: "startup" });
+  assert.ok(!notices.some((text) => /newer than the last tested/.test(text)), "supported newer Pi versions must not warn");
   t.after(async () => { await emit("session_shutdown"); });
   return { cwd, configPath, log, emit, tool, call, metadata, count, shell, notices, widgets, ctx, ext,
     prompts: () => prompts, deny: () => { allow = false; } };
@@ -93,16 +94,20 @@ async function setup(t, { mode = "tui", dependency = true, trusted = true,
 
 test("Pi loads the extension without session-side effects", { skip: !entry }, async (t) => {
   const env = await setup(t, { mode: "print" });
-  assert.equal(env.tool("assume_profile").exposure, "hidden");
+  assert.equal(env.tool("assume_profile").exposure, "model-only");
   assert.equal(env.tool("aws_bash").exposure, "hidden");
   assert.equal(env.tool("bash"), undefined);
   assert.equal(env.count(), 0);
+  assert.equal((await env.metadata()).available, false);
+  assert.match((await env.metadata()).reason, /disabled outside interactive/);
+  assert.match((await env.emit("before_agent_start"))[0].message.content, /role access is unavailable/);
   await assert.rejects(env.call("assume", "test-a"), /disabled outside interactive/);
 });
 
 test("missing Granted notifies and leaves shell/guards untouched", { skip: !entry || process.platform !== "darwin" }, async (t) => {
   const env = await setup(t, { dependency: false });
-  assert.equal(env.tool("assume_profile").exposure, "hidden");
+  assert.equal(env.tool("assume_profile").exposure, "model-only");
+  assert.match((await env.metadata()).reason, /not installed/);
   assert.equal(env.tool("aws_bash").exposure, "hidden");
   assert.equal(env.tool("bash"), undefined);
   assert.equal(env.count(), 0);
@@ -112,23 +117,39 @@ test("missing Granted notifies and leaves shell/guards untouched", { skip: !entr
 
 test("untrusted project remains inert", { skip: !entry }, async (t) => {
   const env = await setup(t, { trusted: false });
-  assert.equal(env.tool("assume_profile").exposure, "hidden");
+  assert.equal(env.tool("assume_profile").exposure, "model-only");
+  assert.match((await env.metadata()).reason, /requires project trust/);
   assert.equal(env.tool("aws_bash").exposure, "hidden");
   assert.equal(env.tool("bash"), undefined);
   assert.equal(env.count(), 0);
 });
 
 for (const [label, options] of [["missing", { writePolicy: false }], ["empty", { profiles: [] }]]) {
-  test(`${label} policy keeps the extension silent and inactive`, { skip: !entry || process.platform !== "darwin" }, async (t) => {
+  test(`${label} policy exposes diagnostics without enabling role access`, { skip: !entry }, async (t) => {
     const env = await setup(t, options);
-    assert.equal(env.tool("assume_profile").exposure, "hidden");
+    assert.equal(env.tool("assume_profile").exposure, "model-only");
+    const status = await env.metadata();
+    assert.equal(status.available, false);
+    assert.match(status.reason, /no AWS profile policy/);
+    assert.match(status.guidance, /stop and report the blocker/);
+    assert.match(status.guidance, /Do not fall back to ambient credentials/);
+    assert.match(status.guidance, /Pi extension tool, not a shell command, function, or alias/);
+    assert.match(status.guidance, /Never probe for it with bash\/type\/which/);
+    assert.match(env.tool("assume_profile").description, /Pi tool, not a shell command or alias/);
+    assert.ok(!JSON.stringify(status).includes("FAKE_SECRET"));
     assert.equal(env.tool("aws_bash").exposure, "hidden");
     assert.equal(env.tool("bash"), undefined);
     assert.deepEqual(env.notices, []);
     assert.equal(env.widgets.has("assume"), false);
     assert.deepEqual(await env.emit("tool_call", { toolName: "read", input: { path: "~/.aws/credentials" } }), [undefined]);
     assert.deepEqual(await env.emit("tool_call", { toolName: "write", input: { path: ".pi/aws-assume.json" } }), [undefined]);
+    const reminder = (await env.emit("before_agent_start"))[0].message.content;
+    assert.match(reminder, /role access is unavailable/);
+    assert.match(reminder, /search credential stores/);
+    assert.match(reminder, /not to define a shell alias/);
     assert.deepEqual(await env.emit("before_agent_start"), [undefined]);
+    for (const action of ["list", "clear", "cancel"]) await assert.rejects(env.call(action), /no AWS profile policy/);
+    await assert.rejects(env.shell("echo must-not-run"), /no AWS profile policy/);
     await env.ext.commands.get("assume").handler("status", env.ctx);
     assert.match(env.notices.at(-1), /no AWS profile policy/);
     await assert.rejects(env.call("assume", "test-a"), /no AWS profile policy/);
@@ -470,7 +491,11 @@ test("invalid policy fails closed, reports the error without content, and stays 
   await env.emit("session_start", { reason: "reload" });
   await assert.rejects(env.call("assume", "test-a"), /aws-assume\.json/);
   assert.equal(env.tool("aws_bash").exposure, "hidden");
-  assert.equal(env.tool("assume_profile").exposure, "hidden");
+  assert.equal(env.tool("assume_profile").exposure, "model-only");
+  const status = await env.metadata();
+  assert.equal(status.available, false);
+  assert.match(status.reason, /aws-assume\.json/);
+  assert.ok(!JSON.stringify(status).includes("FAKE_SECRET"));
   assert.equal(env.count(), 0);
   assert.ok(env.notices.some((text) => /aws-assume\.json/.test(text)));
   assert.ok(!env.notices.join("\n").includes("FAKE_SECRET"));

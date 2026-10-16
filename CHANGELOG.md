@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Suppress the newer-than-tested Pi version warning within the supported major version. Minimum-version, unknown-version, and different-major checks still disable role access with a notice.
+
+### Security
+
+- Keep `assume_profile` visible for status diagnostics when setup, mode, trust, platform, version, or Granted prevents role access. Other actions still fail closed and `aws_bash` stays hidden until prerequisites pass.
+- Explain unavailable role access in model-facing context instead of silently disappearing. Instruct the assistant to stop and report blockers for tasks requiring assumed profiles, not hunt for credentials, fall back to ambient credentials, bypass the extension, or edit AWS policy/profile files. Plain `bash` remains unchanged; this is guidance, not isolation.
+
 ## [0.1.0-beta.1] - 2026-10-16
 
 ### Added

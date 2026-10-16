@@ -179,13 +179,13 @@ test("the active profile's configured region is used when no region is inherited
   await session.assume("b", { userInitiated: true });
   assert.equal((await session.environment({})).AWS_REGION, "us-east-1");
 });
-test("Pi version gate: below minimum or other major is inactive, newer minor warns, invalid is inactive", () => {
+test("Pi version gate: below minimum or other major is inactive, newer minor is silent, invalid is inactive", () => {
   const opts = { min: "1.2.0", tested: "1.3.0" };
   assert.deepEqual(parseVersion("1.2.3-beta.1"), [1, 2, 3]);
   assert.equal(parseVersion("latest"), undefined);
   assert.equal(checkPiVersion("1.2.0", opts).status, "ok");
   assert.equal(checkPiVersion("1.3.0", opts).status, "ok");
-  assert.equal(checkPiVersion("1.3.1", opts).status, "newer");
+  assert.deepEqual(checkPiVersion("1.3.1", opts), { status: "newer", message: "" });
   assert.equal(checkPiVersion("1.9.0-rc.1", opts).status, "newer");
   assert.equal(checkPiVersion("1.1.9", opts).status, "older");
   assert.equal(checkPiVersion("2.0.0", opts).status, "major");
