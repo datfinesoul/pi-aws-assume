@@ -2,21 +2,23 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A [Pi](https://github.com/earendil-works/pi) extension for selecting existing AWS IAM Identity Center profiles through an installed [Granted](https://github.com/fwdcloudsec/granted) CLI. In projects that opt in with a profile policy, it adds an `aws_bash` tool that runs commands with the selected profile's temporary credentials, with project allowlisting and once-per-profile session approval. This is a workflow guardrail, **not a credential sandbox**.
+A [Pi](https://github.com/earendil-works/pi) extension that uses [Granted](https://github.com/fwdcloudsec/granted) to run assistant commands with temporary AWS IAM Identity Center credentials. Each project allowlists existing profiles; the assistant asks for approval once per concrete profile per session.
 
 > [!IMPORTANT]
-> **What this extension does and does not do**
->
-> - It does nothing unless the project's `.pi/aws-assume.json` defines rules or selects global rules by ID: no tools, no guards, no prompts, and no change to Pi's shell.
-> - It never replaces or changes Pi's `bash` tool. Plain `bash` keeps your ambient AWS environment, including `AWS_PROFILE`, a default profile, or any other credentials Pi was launched with.
-> - Assumed profiles apply only to the separate `aws_bash` tool. The allowlist and approval control `aws_bash`, not what plain `bash` can do.
-> - The assistant is instructed to use `aws_bash` only when the user or task clearly requires one of the project's `/assume` profiles, and otherwise to use plain `bash`.
->
-> See [Assumptions and design choices](#assumptions-and-design-choices) before relying on it.
+> - **Opt-in per project.** `.pi/aws-assume.json` must define rules or select global rule IDs before AWS tools and guards become available.
+> - **Separate shell tool.** Assumed credentials apply only to `aws_bash`. Plain `bash` is unchanged and keeps your ambient AWS credentials and profiles.
+> - **Explicit use.** The assistant is instructed to use `aws_bash` only when the user or task clearly requires an allowed `/assume` profile; otherwise it uses plain `bash`.
+> - **Not a credential sandbox.** The allowlist and approval do not restrict plain `bash` or other execution tools. Read the [known limitations](#known-limitations).
 
 ## Installation
 
-This alpha targets interactive terminal Pi 1.x (1.2.0 or newer) on macOS. Linux is deferred; JSON, print, and RPC modes leave role functionality inactive. Granted must already be installed and on Pi's `PATH`. In a project with a policy, startup checks the executable without invoking it. If missing, the extension notifies once and stays inactive; it does not install anything or attempt alternative authentication. See [Pi version compatibility](#pi-version-compatibility) for how other Pi versions are handled.
+Requirements:
+
+- **[Granted CLI](https://github.com/fwdcloudsec/granted)** installed and on Pi's `PATH`, with your IAM Identity Center profiles already configured. Follow [Granted's setup guide](https://docs.granted.dev/getting-started) first; this extension does not install it or replace its authentication.
+- **Interactive Pi 1.x, version 1.2.0 or newer.** See [Pi version compatibility](#pi-version-compatibility).
+- **macOS.** This alpha does not support Linux or JSON, print, and RPC modes.
+
+In a project with a policy, startup checks for Granted without invoking it. If missing, the extension notifies once and stays inactive.
 
 ### Global installation
 
@@ -36,7 +38,7 @@ Pi records the package in `.pi/settings.json`.
 
 Project packages load only after project trust. Run `/reload` or start a new session after installation.
 
-Installation scope and [configuration layers](#configuration) are independent: global and project installations both read the global rule library and the trusted working project's policy. Global rules alone never activate the extension; each project selects the global rules it uses.
+Installation scope and [configuration](#configuration) are independent: either installation reads the trusted working project's policy and any global rules it selects. A global installation or rule library alone never activates the extension.
 
 > [!NOTE]
 > Pi identifies a package by where it was installed from. Installing pi-aws-assume globally and for a project from the same source is fine: the project installation replaces the global one. Installing it from different locations, such as GitHub globally and a local checkout for a project, loads both copies, and Pi does not reconcile them.
@@ -73,19 +75,18 @@ Create your project policy as described in [Configuration](#configuration), then
 | `/assume cancel` | Cancel pending authentication and queued role work without clearing the previously active credentials or per-session approvals. |
 | `/assume clear` | Clear active credentials and cancel pending authentication. Existing per-session approvals remain. |
 
-The assistant selects a profile with `assume_profile` and then runs commands that need it with `aws_bash`. Both are model-only tools, registered only in projects with a usable policy, and described to the model as tools to use only when the user or task clearly requires an allowed `/assume` profile. When that is unclear, the assistant is told not to use them.
+For assistant-driven use, `assume_profile` selects the profile and `aws_bash` runs the commands. Both are model-only tools, available only with a usable project policy. Neither is callable through codemode scripts, because they can open approval or authentication dialogs.
 
-`assume_profile` takes `action` equal to `list`, `status`, `assume`, `cancel`, or `clear`; a concrete `profile` is required for `assume`. The list action accepts an optional integer `offset` and returns pages of 100 names with `totalProfiles` and `nextOffset`. The picker/completions include the full discovered match list, not wildcard rules. Neither tool is callable through codemode scripts, because both can open approval or authentication dialogs.
+- `assume_profile` accepts an `action`: `list`, `status`, `assume`, `cancel`, or `clear`. `assume` requires a concrete `profile`, never a wildcard. `list` accepts an optional integer `offset` and returns up to 100 names, `totalProfiles`, and `nextOffset`. The picker and completions show all discovered matches.
+- `aws_bash` takes the same input as `bash` and uses Pi's configured shell and command prefix. Without an active profile, it refuses to run rather than falling back to ambient credentials.
 
-`aws_bash` takes the same input as `bash` and uses Pi's configured shell and command prefix. It refuses to run when no profile is active, instead of falling back to ambient or default credentials.
+Approval is per concrete profile, not per wildcard: approving `example/team-a/readonly` does not approve `example/team-b/readonly`. Your own `/assume` selection counts as approval; switching back in the same session does not prompt again. A declined or failed switch preserves the previous active profile. Accepted approvals remain even if authentication fails.
 
-The first assistant selection of each allowed concrete profile prompts for approval. Approval is never attached to a wildcard rule: approving `example/team-a/readonly` does not approve `example/team-b/readonly`, even when both match the same rule. Your own `/assume` selection counts as approval. Switching back to an approved profile in the same uninterrupted session does not prompt again. Declining or failing a switch leaves the previous active profile unchanged and reports the failure. An accepted approval is remembered even if authentication subsequently fails.
+**No automatic role activation.** Credentials and approvals are memory-only and reset on restart, `/reload`, `/new`, resume, fork, or shutdown. Neither session history nor Granted's cache restores them; you must select a profile again.
 
-No profile is active automatically. Credentials and approvals live only in memory and are discarded on restart, `/reload`, `/new`, resume, fork, or shutdown. History and Granted cache entries never reactivate a role or restore approvals. An explicit selection is always required after reset.
+After the first successful assumption, a row above the editor shows the active profile and expiration in local time, such as `2026-10-15T19:40+9`. Clearing shows `AWS: none`; a session reset hides the row until the next successful assumption. Pi's footer is unchanged.
 
-An AWS row appears above the editor only after the first successful profile assumption in the current session. It shows the active profile on the left and credential expiration right-aligned on the same line. Expiration uses local time in the compact format `2026-10-15T19:40+9`, with minute precision and a numeric UTC offset (`+5:30` for fractional-hour offsets). Clearing the role removes the expiration and shows `AWS: none`; a reload or session reset hides the row until another successful assumption. The row does not replace Pi's footer.
-
-Once selected, successive **`aws_bash` calls** receive the profile's temporary credentials. CLI/SDK programs launched through those calls inherit them. Plain `bash`, the launching terminal, Pi's own AWS/model-provider environment, user `!`/`!!` commands, other execution tools, subprocesses in other extensions, and MCP servers are not changed.
+Successive `aws_bash` calls and their CLI/SDK subprocesses inherit the selected credentials. Plain `bash`, the launching terminal, Pi's model-provider environment, user `!`/`!!` commands, other extensions and execution tools, and MCP servers are unchanged.
 
 ## Configuration
 
@@ -95,17 +96,17 @@ Once selected, successive **`aws_bash` calls** receive the profile's temporary c
 | Global | `~/.pi/agent/aws-assume.json` | Personal library of named rules; follows `PI_CODING_AGENT_DIR`. Applies to a project only by selected ID. |
 | Project | `<project>/.pi/aws-assume.json` | Read from the working directory only after Pi grants project trust. Defines the project's own rules and selects global rule IDs. |
 
-Every file uses one schema: `profiles` is a list of `{ "id", "pattern" }` rules. A project's own rules always apply. Global rules apply only when the project lists their IDs in `global`; the global file is not read otherwise. Rules added to the global file later never reach an existing project, and a global file cannot select rules for projects. Bundled rules are part of the selectable library, and a global rule with the same ID replaces a bundled one.
+All files define `profiles` as `{ "id", "pattern" }` rules. A project's own rules always apply; global rules apply only when the project lists their IDs in `global`. Without selected IDs, the global file is not read. Bundled rules share the selectable library; a global rule with the same ID replaces a bundled one.
 
-**This intentionally differs from the usual layered configuration of Pi extensions,** where global items merge into every project automatically. For an allowlist, each project must choose what it allows.
+**Unlike the automatic configuration merging used by [other datfinesoul Pi extensions](https://github.com/datfinesoul?tab=repositories&q=topic%3Api-extension&type=&language=&sort=), this allowlist requires explicit project selection.** New global rule IDs never widen an existing project's access. The global file cannot opt projects in.
 
-The extension is active only when the project's own rules plus its selected global rules are non-empty. A missing project policy, or one with no rules and no `global` IDs, keeps the extension silently inactive regardless of global rules.
+A missing or empty project policy leaves the extension inactive, regardless of global rules. Policy loads at session start or `/reload`, not when files change. Invalid or unreadable participating files fail the whole policy closed, with a notice identifying the file's layer but not its contents. Undefined global IDs and conflicts between selected and project rule IDs are invalid.
 
-Policy is loaded once per session start/reload, not automatically adopted after file edits. An invalid or unreadable file that participates fails the whole policy closed and reports which file (project, global, or bundled) is at fault without exposing raw contents. Selecting an undefined global ID, or reusing a selected global ID as a project rule ID, is invalid. The extension has no profile-writing API and never directly writes AWS profiles, either policy, or global Pi settings. Granted's own configured side effects are separate; see [Credentials and refresh](#credentials-and-refresh).
+The extension never writes policies, AWS profiles, or global Pi settings. Granted has its own side effects; see [Credentials and refresh](#credentials-and-refresh).
 
 ### Allow exact profiles
 
-Create `.pi/aws-assume.json` **yourself outside the assistant**, using only your intended existing profiles. This generic example is not an active policy:
+Create `.pi/aws-assume.json` **yourself outside the assistant**, using your existing profile names. For example:
 
 ```json
 {
@@ -113,7 +114,7 @@ Create `.pi/aws-assume.json` **yourself outside the assistant**, using only your
 }
 ```
 
-Add your actual `.pi/aws-assume.json` to your project's ignore rules if its names are private; the extension does not create the file or edit ignore rules. Never include credentials in the policy. Run `/reload` after changes.
+Never put credentials in the policy. If profile names are private, add `.pi/aws-assume.json` to your project's ignore rules yourself. The extension neither creates the policy nor edits ignore rules. Run `/reload` after changes.
 
 ### Allow a group of profiles
 
@@ -161,11 +162,11 @@ Then select the rules a trusted project uses in its `.pi/aws-assume.json`, optio
 }
 ```
 
-This project allows `example/**/readonly` and `example/team/admin`, but not `audit` or any global rule added later. Selected rules become eligible, not approved or assumed. First assistant use still prompts once per concrete profile per session.
+This project allows profiles matching `example/**/readonly` and `example/team/admin`, but imports neither `audit` nor future global rule IDs. Selection makes profiles eligible, not approved or assumed.
 
 ### Change or remove access
 
-Edit or remove entries yourself outside the assistant, then `/reload`. Changing a global rule's pattern affects every project that selects its ID. To deactivate the extension in a project, remove its rules and `global` IDs, or remove the project file. A reload clears the active role and approvals; policy changes are not applied to an already-running session automatically. No command or tool edits the allowlist or AWS profiles.
+Edit or remove entries yourself outside the assistant, then `/reload` to apply changes and clear the active role and approvals. Changing a global rule's pattern affects every project that selects its ID. To deactivate a project, remove its rules and `global` IDs, or delete its policy file. No extension command or tool edits the allowlist or AWS profiles.
 
 ### Field reference
 
@@ -182,13 +183,12 @@ Unknown fields, other value types, and invalid rules fail the whole policy close
 
 ### Assumptions and design choices
 
-- **Opt-in per project.** The extension activates only in an interactive, trusted project whose `.pi/aws-assume.json` defines its own rules or selects global rules by ID. Otherwise it registers no usable tools, guards, reminders, or widget, and it does not notify. A global installation is therefore inert in projects that have not opted in.
-- **Plain `bash` is never changed.** It keeps the AWS environment Pi was launched with, including a default profile, `AWS_PROFILE`, SSO caches, or instance metadata. The assistant can still run `aws --profile <anything> …` through plain `bash` with your ambient setup. The allowlist and approval cover only `aws_bash`.
-- **Assumed profiles apply only to `aws_bash`.** It removes inherited AWS identity variables, adds the selected profile's temporary credentials, and refuses to run without an active profile.
-- **The model decides when to use it.** Tool descriptions and a short reminder tell the assistant to use `assume_profile` and `aws_bash` only when the user or task clearly requires one of the project's allowed profiles, and not to use them when that is unclear. This is guidance, not enforcement.
+- **Project opt-in.** A trusted project must define or select rules in `.pi/aws-assume.json`. Global installation alone grants no access through the extension.
+- **Separate credential scope.** Only `aws_bash` receives the selected temporary credentials, after inherited AWS identity variables are removed. Plain `bash` retains ambient credentials and access to other host credential sources.
+- **Model guidance, not enforcement.** Tool descriptions and a hidden context reminder tell the assistant when to use the AWS tools. They cannot force that choice.
 - **Region order in `aws_bash`.** An inherited `AWS_REGION`, then an inherited `AWS_DEFAULT_REGION`, then the selected profile's `region` in your AWS config file, then `us-east-1`. A CLI `--region` or explicit SDK region still wins. An inherited region therefore applies to every selected profile.
-- **Memory only.** Credentials and approvals are never written to disk by the extension and reset on restart, `/reload`, `/new`, resume, fork, or shutdown.
-- **macOS, Granted, interactive mode.** Other platforms, other credential tools, and non-interactive modes are out of scope for this alpha.
+- **Memory-only state.** The extension never persists credentials or approvals and never automatically reactivates a role. Granted's own cache is separate.
+- **macOS, Granted, interactive mode.** Other platforms, credential tools, and non-interactive modes are out of scope for this alpha.
 - **Not a sandbox.** See [Known limitations](#known-limitations).
 
 ### Pi version compatibility
@@ -206,19 +206,21 @@ To control when the extension updates, install a pinned tag or npm version inste
 
 ### Components
 
-The extension registers `/assume`, the model-only `assume_profile` and `aws_bash` tools, session lifecycle hooks, a widget, and best-effort tool-call guards. `aws_bash` reuses Pi's bash tool implementation, configured shell, and command prefix. When the active profile changes, a short hidden AWS context reminder is added before the next agent run. In-memory role state is cleared on session shutdown/replacement. It does not change the launching shell or provide a security boundary.
+The extension registers `/assume`, model-only AWS tools, session hooks, the status widget, and best-effort tool-call guards. `aws_bash` reuses Pi's bash implementation. A hidden AWS context reminder is added before the next agent run when the active profile changes; session shutdown or replacement clears role state.
 
 ### Profile discovery
 
-When glob rules exist, the trusted extension reads section names from `~/.aws/config` and `~/.aws/credentials` (or `AWS_CONFIG_FILE`/`AWS_SHARED_CREDENTIALS_FILE`) at session start/reload. It retains only valid profile names; file values/credentials are never returned, logged, or used to run credential processes during discovery. Files are capped at 2 MiB each and discovery at 10,000 distinct names. Matching discovered names are sorted and deduplicated for the picker, completions, and list tool. SSO-session/service sections are not profiles. No CLI, AWS request, browser login, or role assumption is needed to list them.
+For glob rules, discovery reads profile section names from `~/.aws/config` and `~/.aws/credentials` (or `AWS_CONFIG_FILE`/`AWS_SHARED_CREDENTIALS_FILE`) at session start/reload. It excludes SSO-session/service sections, retains valid names, and sorts and deduplicates matches for the picker, completions, and list tool. Limits are 2 MiB per file and 10,000 distinct names. Discovery never returns or logs credential values, runs credential processes, or invokes AWS or Granted.
 
-Exact-name entries remain listed even if discovery cannot find them; Granted validates them on selection. Discovery failures produce a generic warning and omit wildcard expansion. An explicitly supplied concrete name can still be selected if it matches a rule; the listing is a snapshot, not the authorization authority. Newly added matching profiles become eligible, **not automatically approved**. `/reload` refreshes the picker and discards existing role/approval state. Wildcard strings themselves can never be selected, approved, or passed to Granted.
+Exact-name rules remain listed even if discovery misses them; Granted validates them on selection. Discovery failures warn and omit wildcard expansion. The listing is a snapshot: an explicitly supplied concrete name is eligible if it matches a rule, even when not listed. New matches still require approval. `/reload` refreshes discovery and resets credentials and approvals. Wildcard strings can never be selected or passed to Granted.
 
 ### Credentials and refresh
 
-The extension directly invokes the resolved Granted executable as `granted credential-process --profile <name> --window 5m --auto-login`, without shell interpolation. Granted retains responsibility for its existing configuration, keychain/cache, and SSO browser login. This interface does not run the `assume` shell alias. It may still write Granted's normal logs/cache/browser integration files. In the inspected upstream code, `credential-process` also invokes profile-registry auto-sync; configured registries can therefore update AWS profiles. This adapter does not disable that behavior or change your Granted settings. If profile files must be strictly immutable, address registry configuration outside Pi before a live trial; this MVP cannot promise that trusted Granted will never update them.
+The extension invokes `granted credential-process --profile <name> --window 5m --auto-login` directly, without shell interpolation or the `assume` shell alias. Granted manages its configuration, keychain/cache, and SSO browser login, and may write logs, cache, and browser-integration files. Its `credential-process` also invokes profile-registry auto-sync, so configured registries can update AWS profiles. The extension does not disable this or change Granted settings. If profile files must remain immutable, review Granted's registry configuration outside Pi before use.
 
-Credential stdout is privately captured and validated, with a 64 KiB limit. Raw stdout/stderr is never forwarded into Pi tool results, notifications, error messages, or session entries. Errors are intentionally generic; diagnose Granted configuration outside Pi. If SSO is needed, Granted opens the browser after approval/selection. A cancellable progress screen with a spinner and seconds-remaining countdown appears while credentials are resolved, including during refresh before an `aws_bash` call. Press Escape (or your configured dialog-cancel key) to abort authentication without clearing the previous active role. Authentication times out after one minute. The progress screen owns its deadline and closes independently of credential-fetch completion. Tool abort and session reset/shutdown also cancel the subprocess. `/assume cancel` provides a separate cancellation action when the command interface is available; `/assume clear` additionally discards active credentials. Browser fallback URLs/device codes are not displayed because Granted diagnostics are withheld; if a browser cannot open, authenticate outside Pi and retry.
+Credential output is privately captured and validated, with a 64 KiB stdout limit. Raw stdout/stderr never reaches tool results, notifications, errors, or session entries. Errors are deliberately generic; diagnose Granted outside Pi.
+
+When SSO is needed, Granted opens the browser after approval/selection. A progress screen shows a spinner and countdown during selection or refresh. Press Escape (or your dialog-cancel key) to abort without clearing the previous role. Authentication times out after one minute; the screen closes independently of credential-fetch completion. Tool abort, session reset, and shutdown also cancel the subprocess. `/assume cancel` preserves active credentials; `/assume clear` discards them. Browser fallback URLs and device codes are withheld with Granted's diagnostics: if the browser cannot open, authenticate outside Pi and retry.
 
 Only temporary credentials with a session token and a future expiration are accepted. They are reused in memory and refreshed on demand before the next `aws_bash` command within five minutes of expiry. No background refresh timers run, and no refresh occurs without an explicitly active role. Concurrent refresh/selection requests are serialized. Reset/clear invalidates pending work so late results cannot restore credentials.
 
@@ -243,7 +245,7 @@ Use OS isolation/protected credential handling later if stronger guarantees beco
 
 ## Development
 
-No runtime npm dependencies beyond the Pi host and no build step. Granted is an external runtime prerequisite, not an npm dependency. Pure helpers are in `src/*.js`; Pi wiring is in `extensions/aws-assume/index.ts`; tests use Node's built-in runner.
+No build step or runtime npm dependencies beyond Pi. [Granted](https://github.com/fwdcloudsec/granted) is an external runtime requirement. Pure helpers live in `src/*.js`, Pi wiring in `extensions/aws-assume/index.ts`, and tests use Node's built-in runner.
 
 ```bash
 npm test
@@ -259,7 +261,7 @@ For an installed-Pi loader/command/tool smoke test, point `PI_CODING_AGENT_ENTRY
 PI_CODING_AGENT_ENTRY=/path/to/pi-coding-agent/dist/index.js npm test
 ```
 
-Without that variable, installed-Pi tests are explicitly skipped. Interactive integration tests run on macOS only and are not run in CI yet; run them locally against the Pi version you target before a release. All authentication tests use a fake Granted executable and fake credentials in temporary directories: no model requests, actual AWS credentials, or real role assumptions. The integration targets Pi 1.2.0. Live Granted compatibility/authentication remains a user-run smoke test; the prototype was developed with Granted 0.38.0 installed.
+Without this variable, installed-Pi tests are skipped. Interactive integration tests target Pi 1.2.0 on macOS and do not yet run in CI; run them locally before a release. Authentication tests use fake Granted executables and credentials in temporary directories—no model requests, real AWS credentials, or role assumptions. Live Granted authentication remains a user-run smoke test; the prototype was developed with Granted 0.38.0.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull-request guidance.
 
