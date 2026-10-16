@@ -264,6 +264,8 @@ PI_CODING_AGENT_ENTRY=/path/to/pi-coding-agent/dist/index.js npm test
 
 Without this variable, installed-Pi tests are skipped. Interactive integration tests target Pi 1.2.0 on macOS and do not yet run in CI; run them locally before a release. Authentication tests use fake Granted executables and credentials in temporary directories—no model requests, real AWS credentials, or role assumptions. Live Granted authentication remains a user-run smoke test; the prototype was developed with Granted 0.38.0.
 
+Every pull request that triggers CI must bump `version` in `package.json` and move the `Unreleased` changelog entries under a matching `## [<version>] - <date>` heading; CI fails otherwise. Pull requests that change only Markdown skipped by CI are exempt. After the merge to `main` passes CI, the Release workflow tags that commit `v<version>`. Merges that do not change the version are not tagged.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull-request guidance.
 
 ## License

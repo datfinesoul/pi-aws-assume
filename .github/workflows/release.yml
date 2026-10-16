@@ -1,0 +1,72 @@
+name: Release
+
+# Tags the default branch with v<package.json version> after CI passes on a merge that
+# changes the version. Manual runs tag the current version when it has no tag yet.
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag version
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+      - name: Create tag
+        env:
+          COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+          REF: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" != "$DEFAULT_BRANCH" ]; then
+            echo "::error::Releases are tagged only from $DEFAULT_BRANCH (got $REF)."
+            exit 1
+          fi
+          version=$(node -p 'require("./package.json").version')
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::package.json version '$version' is not valid SemVer."
+            exit 1
+          fi
+          if [ "$EVENT" = "workflow_run" ]; then
+            previous=$( (git show "$COMMIT^:package.json" 2>/dev/null || true) | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).version??"")}catch{console.log("")}})')
+            if [ "$previous" = "$version" ]; then
+              echo "Version $version is unchanged by this merge; nothing to release."
+              exit 0
+            fi
+          fi
+          tag="v$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists; nothing to release."
+            exit 0
+          fi
+          if ! grep -Fq "## [$version] - " CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$version] - <date>' section."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "$tag" "$COMMIT"
+          git push origin "refs/tags/$tag"
+          echo "Tagged $COMMIT as $tag."
