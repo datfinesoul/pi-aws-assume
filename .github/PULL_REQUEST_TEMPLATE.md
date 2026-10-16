@@ -13,5 +13,6 @@ Describe the problem and solution.
 - [ ] Tests cover new or changed behavior, or none changed.
 - [ ] User-facing documentation is updated, or none is needed.
 - [ ] `CHANGELOG.md` is updated for user-visible changes, or there are none.
+- [ ] `version` in `package.json` is bumped with a matching dated `CHANGELOG.md` section, or the change touches only Markdown that CI skips.
 - [ ] No secrets or private data are included.
 - [ ] The change complies with the Code of Conduct and MIT License.

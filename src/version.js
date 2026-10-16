@@ -1,7 +1,7 @@
 // Pi compatibility gate. Pi does not check extension compatibility on update, so the
-// extension checks the running host version itself at session start.
+// extension checks the running host version itself at session start. Any version of the
+// supported major at or above the minimum is accepted silently.
 export const MIN_PI_VERSION = "1.2.0";
-export const TESTED_PI_VERSION = "1.2.0";
 
 // Compare major.minor.patch only; pre-release and build suffixes are ignored.
 export function parseVersion(value) {
@@ -14,27 +14,23 @@ function compare(a, b) {
   return 0;
 }
 
-// Returns { status, message }. Only "ok" and "newer" may activate the extension.
-export function checkPiVersion(version, { min = MIN_PI_VERSION, tested = TESTED_PI_VERSION } = {}) {
+// Returns { status, message }. Only "ok" may enable role access.
+export function checkPiVersion(version, { min = MIN_PI_VERSION } = {}) {
   const current = parseVersion(version);
   const minimum = parseVersion(min);
-  const latest = parseVersion(tested);
   if (!current) {
-    return { status: "invalid", message: "aws-assume: cannot determine the Pi version; the extension is inactive." };
+    return { status: "invalid", message: "Cannot determine the Pi version." };
   }
   const shown = current.join(".");
   if (current[0] !== minimum[0]) {
-    return { status: "major", message: `aws-assume: Pi ${shown} is a different major version than supported (${minimum[0]}.x); the extension is inactive until pi-aws-assume is updated.` };
+    return { status: "major", message: `Pi ${shown} is a different major version than supported (${minimum[0]}.x); update pi-aws-assume.` };
   }
   if (compare(current, minimum) < 0) {
-    return { status: "older", message: `aws-assume: requires Pi ${min} or newer (running ${shown}); the extension is inactive.` };
-  }
-  if (compare(current, latest) > 0) {
-    return { status: "newer", message: `aws-assume: Pi ${shown} is newer than the last tested version (${tested}); continuing, but report problems.` };
+    return { status: "older", message: `Requires Pi ${min} or newer (running ${shown}).` };
   }
   return { status: "ok", message: "" };
 }
 
 export function isUsableVersion(result) {
-  return result.status === "ok" || result.status === "newer";
+  return result.status === "ok";
 }
