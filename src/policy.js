@@ -61,71 +61,71 @@ export function resolveAllowedProfiles(patterns, available = []) {
   return Object.freeze([...names].sort());
 }
 
-const invalidPolicy = () => new Error("aws-assume.json contains invalid or duplicate policy fields/rules; no profiles are allowed.");
+const LABELS = Object.freeze({
+  project: "Project .pi/aws-assume.json",
+  global: "Global aws-assume.json",
+  bundled: "Bundled aws-assume config.json",
+});
+const failure = (source, problem) => new Error(`${LABELS[source]} ${problem}; no profiles are allowed.`);
+const isObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-export function parsePolicyLayer(text) {
+// One schema for every layer: rules are exactly { id, pattern }. Only the project may select global rule IDs.
+export function parsePolicyFile(text, source = "project") {
+  if (!LABELS[source]) throw new TypeError("Unknown policy source.");
   let value;
-  try { value = JSON.parse(text); } catch { throw new Error("aws-assume.json must contain valid JSON; no profiles are allowed."); }
-  if (!value || Array.isArray(value) || typeof value !== "object" ||
-      Object.keys(value).some((key) => !["enabled", "profiles"].includes(key)) || !Array.isArray(value.profiles) ||
-      (value.enabled !== undefined && typeof value.enabled !== "boolean") || value.profiles.length > 100) throw invalidPolicy();
+  try { value = JSON.parse(text); } catch { throw failure(source, "must contain valid JSON"); }
+  const keys = source === "project" ? ["global", "profiles"] : ["profiles"];
+  if (!isObject(value) || Object.keys(value).some((key) => !keys.includes(key))) {
+    throw failure(source, `may contain only ${keys.map((key) => `"${key}"`).join(" and ")}`);
+  }
+  const profiles = value.profiles ?? [];
+  const global = value.global ?? [];
+  if (!Array.isArray(profiles) || profiles.length > 100) throw failure(source, 'has an invalid "profiles" array');
+  if (!Array.isArray(global) || global.length > 100 || global.some((id) => !isProfileName(id)) ||
+      new Set(global).size !== global.length) throw failure(source, 'has an invalid or duplicate "global" rule ID');
   const ids = new Set();
-  const profiles = value.profiles.map((entry) => {
-    // Legacy strings remain supported: the pattern itself is their stable ID.
-    const rule = typeof entry === "string" ? { id: entry, pattern: entry } : entry;
-    if (!rule || Array.isArray(rule) || typeof rule !== "object" ||
-        Object.keys(rule).some((key) => !["id", "pattern", "enabled"].includes(key)) ||
-        typeof rule.id !== "string" || !isPattern(rule.id) || ids.has(rule.id) ||
-        (rule.pattern !== undefined && !isPattern(rule.pattern)) ||
-        (rule.enabled !== undefined && typeof rule.enabled !== "boolean")) throw invalidPolicy();
-    ids.add(rule.id);
-    return Object.freeze({ ...rule });
-  });
-  return Object.freeze({ ...value, profiles: Object.freeze(profiles) });
-}
-
-export function mergePolicyLayers(...layers) {
-  const rules = new Map();
-  for (const layer of layers) {
-    for (const rule of layer.profiles) {
-      // Retain disabled entries so a later explicit re-enable can inherit their pattern.
-      rules.set(rule.id, { ...rules.get(rule.id), ...rule });
+  const rules = profiles.map((rule) => {
+    if (!isObject(rule) || Object.keys(rule).sort().join() !== "id,pattern" ||
+        !isProfileName(rule.id) || !isPattern(rule.pattern) || ids.has(rule.id)) {
+      throw failure(source, 'has an invalid or duplicate rule; each rule must be { "id", "pattern" }');
     }
-  }
-  if (rules.size > 100) throw invalidPolicy();
-  const patterns = [];
-  for (const rule of rules.values()) {
-    if (rule.enabled === false) continue;
-    if (!isPattern(rule.pattern)) throw invalidPolicy();
-    patterns.push(rule.pattern);
-  }
-  return Object.freeze([...new Set(patterns)]);
+    ids.add(rule.id);
+    return Object.freeze({ id: rule.id, pattern: rule.pattern });
+  });
+  return Object.freeze({ global: Object.freeze([...global]), profiles: Object.freeze(rules) });
 }
 
-export function parsePolicy(text) {
-  return mergePolicyLayers(parsePolicyLayer(text));
-}
-
-function readPolicyLayer(path) {
-  try { return parsePolicyLayer(readFileSync(path, "utf8")); }
+function readPolicyFile(path, source) {
+  let text;
+  try { text = readFileSync(path, "utf8"); }
   catch (error) {
     if (error.code === "ENOENT") return undefined;
-    if (error.code) throw new Error("Cannot read aws-assume.json; no profiles are allowed.");
-    throw error;
+    throw failure(source, "cannot be read");
   }
+  return parsePolicyFile(text, source);
 }
 
-export function loadPolicy(path) {
-  const layer = readPolicyLayer(path);
-  return layer ? mergePolicyLayers(layer) : Object.freeze([]);
-}
-
-export function loadPolicyLayers({ bundledPath, globalPath, projectPath }) {
-  const project = readPolicyLayer(projectPath);
-  // Global rules alone never opt a project in. Preserve legacy non-empty policy opt-in.
-  if (!project || project.enabled === false ||
-      (project.enabled !== true && !project.profiles.length)) return Object.freeze([]);
-  const bundled = readPolicyLayer(bundledPath);
-  const global = readPolicyLayer(globalPath);
-  return mergePolicyLayers(...[bundled, global, project].filter(Boolean));
+// Returns the effective profile patterns. Global rules apply only when the project selects their IDs,
+// so rules added to the global file later never reach an existing project.
+export function loadPolicy({ bundledPath, globalPath, projectPath }) {
+  const project = readPolicyFile(projectPath, "project");
+  if (!project) return Object.freeze([]);
+  const selected = [];
+  if (project.global.length) {
+    // Bundled rules are the lowest layer of the selectable library; a global rule with the same ID replaces it.
+    const library = new Map();
+    for (const layer of [readPolicyFile(bundledPath, "bundled"), readPolicyFile(globalPath, "global")]) {
+      for (const rule of layer?.profiles ?? []) library.set(rule.id, rule);
+    }
+    const own = new Set(project.profiles.map((rule) => rule.id));
+    for (const id of project.global) {
+      if (own.has(id)) throw failure("project", 'uses a "global" rule ID that is also a project rule ID');
+      const rule = library.get(id);
+      if (!rule) throw failure("project", 'selects a "global" rule ID that is not defined globally');
+      selected.push(rule);
+    }
+  }
+  const rules = [...selected, ...project.profiles];
+  if (rules.length > 100) throw failure("project", "selects more than 100 rules in total");
+  return Object.freeze([...new Set(rules.map((rule) => rule.pattern))]);
 }

@@ -7,7 +7,7 @@ A [Pi](https://github.com/earendil-works/pi) extension for selecting existing AW
 > [!IMPORTANT]
 > **What this extension does and does not do**
 >
-> - It does nothing without project opt-in through `.pi/aws-assume.json` and at least one effective profile rule: no tools, no guards, no prompts, and no change to Pi's shell.
+> - It does nothing unless the project's `.pi/aws-assume.json` defines rules or selects global rules by ID: no tools, no guards, no prompts, and no change to Pi's shell.
 > - It never replaces or changes Pi's `bash` tool. Plain `bash` keeps your ambient AWS environment, including `AWS_PROFILE`, a default profile, or any other credentials Pi was launched with.
 > - Assumed profiles apply only to the separate `aws_bash` tool. The allowlist and approval control `aws_bash`, not what plain `bash` can do.
 > - The assistant is instructed to use `aws_bash` only when the user or task clearly requires one of the project's `/assume` profiles, and otherwise to use plain `bash`.
@@ -36,7 +36,7 @@ Pi records the package in `.pi/settings.json`.
 
 Project packages load only after project trust. Run `/reload` or start a new session after installation.
 
-Installation scope and [configuration layers](#configuration) are independent: global and project installations both merge bundled defaults, global rules, and the trusted working project's policy. Global rules alone never activate the extension; each project must opt in.
+Installation scope and [configuration layers](#configuration) are independent: global and project installations both read the global rule library and the trusted working project's policy. Global rules alone never activate the extension; each project selects the global rules it uses.
 
 > [!NOTE]
 > Pi identifies a package by where it was installed from. Installing pi-aws-assume globally and for a project from the same source is fine: the project installation replaces the global one. Installing it from different locations, such as GitHub globally and a local checkout for a project, loads both copies, and Pi does not reconcile them.
@@ -55,13 +55,13 @@ pi install --local /path/to/pi-aws-assume
 pi --no-extensions --extension ./extensions/aws-assume/index.ts
 ```
 
-> When migrating from the project-local Assume MVP, disable that prototype before loading this package so the command and tools are not registered twice. Unlike the prototype, this package does not override `bash`; assumed credentials apply only to `aws_bash`. Manually migrate your policy from `.pi/assume.json` to `.pi/aws-assume.json` outside the assistant. The old path is not read, and no credentials or approvals are migrated.
+> When migrating from the project-local Assume MVP, disable that prototype before loading this package so the command and tools are not registered twice. Unlike the prototype, this package does not override `bash`; assumed credentials apply only to `aws_bash`. Manually migrate your policy from `.pi/assume.json` to `.pi/aws-assume.json` outside the assistant, converting each string entry to an `{ "id", "pattern" }` rule. The old path is not read, and no credentials or approvals are migrated.
 
 </details>
 
 ## Usage
 
-Create your project policy as described in [Configuration](#configuration), then `/reload`. Without project opt-in and at least one effective profile rule, `/assume` only explains that the extension is inactive.
+Create your project policy as described in [Configuration](#configuration), then `/reload`. Without project rules or selected global rules, `/assume` only explains that the extension is inactive.
 
 | User command | Behavior |
 |---|---|
@@ -91,15 +91,17 @@ Once selected, successive **`aws_bash` calls** receive the profile's temporary c
 
 | Layer | Location | Behavior |
 |---|---|---|
-| Bundled | `extensions/aws-assume/config.json` | Empty defaults; no shipped allowlist. |
-| Global | `~/.pi/agent/aws-assume.json` | Personal default rules; follows `PI_CODING_AGENT_DIR`. |
-| Project | `<project>/.pi/aws-assume.json` | Read from the working directory only after Pi grants project trust; opts the project in and overrides/adds rules. |
+| Bundled | `extensions/aws-assume/config.json` | Empty; no shipped allowlist. |
+| Global | `~/.pi/agent/aws-assume.json` | Personal library of named rules; follows `PI_CODING_AGENT_DIR`. Applies to a project only by selected ID. |
+| Project | `<project>/.pi/aws-assume.json` | Read from the working directory only after Pi grants project trust. Defines the project's own rules and selects global rule IDs. |
 
-Rules merge from bundled → global → project by stable `id`. Matching IDs override only the supplied fields; new IDs add rules; `"enabled": false` removes that rule. A string remains shorthand for `{ "id": "<string>", "pattern": "<string>" }`, so existing policies continue to work. Disabled rules retain their other fields internally so an explicit higher-layer `"enabled": true` can re-enable them. Removing one rule is not a deny pattern: another enabled rule may still allow the same profile.
+Every file uses one schema: `profiles` is a list of `{ "id", "pattern" }` rules. A project's own rules always apply. Global rules apply only when the project lists their IDs in `global`; the global file is not read otherwise. Rules added to the global file later never reach an existing project, and a global file cannot select rules for projects. Bundled rules are part of the selectable library, and a global rule with the same ID replaces a bundled one.
 
-**Explicit project opt-in is required.** Set `"enabled": true` in the project policy to use global defaults, even with an empty project `profiles` array. Existing non-empty project policies also count as opt-in. A missing project policy, `{"profiles": []}`, or project `"enabled": false` keeps the extension silently inactive regardless of global rules. The top-level `enabled` setting controls project opt-in only; use each rule's `enabled` field to disable a global rule. No effective rules also means inactive.
+**This intentionally differs from the usual layered configuration of Pi extensions,** where global items merge into every project automatically. For an allowlist, each project must choose what it allows.
 
-Policy is loaded once per session start/reload, not automatically adopted after file edits. Invalid or unreadable participating layers fail the entire merge closed and report a generic error without exposing raw contents. Global/bundled layers are not read for projects that have not opted in. The extension has no profile-writing API and never directly writes AWS profiles, either policy, or global Pi settings. Granted's own configured side effects are separate; see [Credentials and refresh](#credentials-and-refresh).
+The extension is active only when the project's own rules plus its selected global rules are non-empty. A missing project policy, or one with no rules and no `global` IDs, keeps the extension silently inactive regardless of global rules.
+
+Policy is loaded once per session start/reload, not automatically adopted after file edits. An invalid or unreadable file that participates fails the whole policy closed and reports which file (project, global, or bundled) is at fault without exposing raw contents. Selecting an undefined global ID, or reusing a selected global ID as a project rule ID, is invalid. The extension has no profile-writing API and never directly writes AWS profiles, either policy, or global Pi settings. Granted's own configured side effects are separate; see [Credentials and refresh](#credentials-and-refresh).
 
 ### Allow exact profiles
 
@@ -107,7 +109,7 @@ Create `.pi/aws-assume.json` **yourself outside the assistant**, using only your
 
 ```json
 {
-  "profiles": ["example-readonly"]
+  "profiles": [{ "id": "readonly", "pattern": "example-readonly" }]
 }
 ```
 
@@ -119,7 +121,11 @@ Exact names and slash-aware glob patterns can be mixed:
 
 ```json
 {
-  "profiles": ["example/*/readonly", "example/**/audit", "example-readonly"]
+  "profiles": [
+    { "id": "team-readonly", "pattern": "example/*/readonly" },
+    { "id": "audit", "pattern": "example/**/audit" },
+    { "id": "readonly", "pattern": "example-readonly" }
+  ]
 }
 ```
 
@@ -133,7 +139,7 @@ Matching is case-sensitive and covers the whole profile name. `/` is a delimiter
 | `example/**/readonly` | Matches `example/readonly`, `example/team/readonly`, and `example/org/team/readonly`. |
 | `example/team-?/readonly` | Matches `example/team-a/readonly`, not `example/team-ab/readonly`. |
 
-### Use global defaults in a project
+### Use global rules in a project
 
 Create your personal rules yourself in `~/.pi/agent/aws-assume.json` (or under `PI_CODING_AGENT_DIR`):
 
@@ -146,52 +152,37 @@ Create your personal rules yourself in `~/.pi/agent/aws-assume.json` (or under `
 }
 ```
 
-Then explicitly opt a trusted project in with `.pi/aws-assume.json`:
-
-```json
-{ "enabled": true, "profiles": [] }
-```
-
-Global rules become eligible, not approved or assumed. First assistant use still prompts once per concrete profile per session.
-
-### Override, add, or remove a rule
-
-For the global defaults above, this project narrows `readonly`, removes `audit`, and adds a project-specific admin profile:
+Then select the rules a trusted project uses in its `.pi/aws-assume.json`, optionally alongside its own rules:
 
 ```json
 {
-  "enabled": true,
-  "profiles": [
-    { "id": "readonly", "pattern": "example/team/readonly" },
-    { "id": "audit", "enabled": false },
-    { "id": "team-admin", "pattern": "example/team/admin" }
-  ]
+  "global": ["readonly"],
+  "profiles": [{ "id": "team-admin", "pattern": "example/team/admin" }]
 }
 ```
 
-To disable a legacy global string rule, use that entire string as the ID, such as `{ "id": "example/**/readonly", "enabled": false }`. A new enabled ID must supply a pattern; an override may inherit it. Disabling one ID does not subtract profiles still matched by another rule.
+This project allows `example/**/readonly` and `example/team/admin`, but not `audit` or any global rule added later. Selected rules become eligible, not approved or assumed. First assistant use still prompts once per concrete profile per session.
 
 ### Change or remove access
 
-Edit or remove entries yourself outside the assistant, then `/reload`. To deactivate the extension in the project even when global rules exist, use `{"enabled": false, "profiles": []}`, use `{"profiles": []}`, or remove the project file. A reload clears the active role and approvals; policy changes are not applied to an already-running session automatically. No command or tool edits the allowlist or AWS profiles.
+Edit or remove entries yourself outside the assistant, then `/reload`. Changing a global rule's pattern affects every project that selects its ID. To deactivate the extension in a project, remove its rules and `global` IDs, or remove the project file. A reload clears the active role and approvals; policy changes are not applied to an already-running session automatically. No command or tool edits the allowlist or AWS profiles.
 
 ### Field reference
 
 | Field | Type | Rules |
 |---|---|---|
-| `enabled` | Boolean, optional | Project opt-in: `true` explicitly opts in, `false` opts out; omitted preserves legacy non-empty-array opt-in. Global/bundled values do not opt a project in. |
-| `profiles` | Array of strings or rule objects, required | At most 100 unique IDs per layer and 100 distinct IDs across the merge, including disabled rules. |
-| `profiles[].id` | String, required for objects | Stable ID, at most 128 characters, using the same syntax as names/patterns. Duplicate IDs within a layer are invalid. |
-| `profiles[].pattern` | String, required for new enabled rules | Exact profile name or path-style glob, at most 128 characters; inherited when omitted by an override. |
-| `profiles[].enabled` | Boolean, optional | Defaults to enabled for new rules; inherited on override. `false` removes the rule, `true` explicitly re-enables it. |
+| `global` | Array of strings, optional; project file only | Global rule IDs the project uses. Defaults to none. At most 100 unique IDs, each defined in the global or bundled file and not reused by a project rule. |
+| `profiles` | Array of rule objects, optional | At most 100 rules with unique IDs per file. The project's own and selected rules total at most 100. |
+| `profiles[].id` | String, required | Stable ID, at most 128 characters, using concrete profile-name syntax. |
+| `profiles[].pattern` | String, required | Exact profile name or path-style glob, at most 128 characters. |
 
-Unknown fields and invalid rules fail the whole policy closed. Regexes, bracket classes, braces, negation, escaping, empty slash segments, and embedded globstars such as `dev**` are not supported. Concrete profile names start with an ASCII letter or digit, contain only ASCII letters, digits, `_`, `.`, `@`, `/`, `+`, `:`, `=`, or `-`, and have no empty slash-delimited segments.
+Unknown fields, other value types, and invalid rules fail the whole policy closed. Regexes, bracket classes, braces, negation, escaping, empty slash segments, and embedded globstars such as `dev**` are not supported. Concrete profile names start with an ASCII letter or digit, contain only ASCII letters, digits, `_`, `.`, `@`, `/`, `+`, `:`, `=`, or `-`, and have no empty slash-delimited segments.
 
 ## How it works
 
 ### Assumptions and design choices
 
-- **Opt-in per project.** The extension activates only in an interactive, trusted project that opts in through `.pi/aws-assume.json` and has at least one effective rule after merging bundled, global, and project policies. Otherwise it registers no usable tools, guards, reminders, or widget, and it does not notify. A global installation is therefore inert in projects that have not opted in.
+- **Opt-in per project.** The extension activates only in an interactive, trusted project whose `.pi/aws-assume.json` defines its own rules or selects global rules by ID. Otherwise it registers no usable tools, guards, reminders, or widget, and it does not notify. A global installation is therefore inert in projects that have not opted in.
 - **Plain `bash` is never changed.** It keeps the AWS environment Pi was launched with, including a default profile, `AWS_PROFILE`, SSO caches, or instance metadata. The assistant can still run `aws --profile <anything> …` through plain `bash` with your ambient setup. The allowlist and approval cover only `aws_bash`.
 - **Assumed profiles apply only to `aws_bash`.** It removes inherited AWS identity variables, adds the selected profile's temporary credentials, and refuses to run without an active profile.
 - **The model decides when to use it.** Tool descriptions and a short reminder tell the assistant to use `assume_profile` and `aws_bash` only when the user or task clearly requires one of the project's allowed profiles, and not to use them when that is unclear. This is guidance, not enforcement.
@@ -239,7 +230,7 @@ Failed refresh prevents the pending shell command from executing with stale cred
 
 - **Plain `bash` is unrestricted by design.** It can use your ambient AWS credentials and any profile, run Granted, read AWS files, or edit `.pi/aws-assume.json`. Policy edits only take effect after your `/reload`, and new profiles still need approval, but review policy changes you did not make.
 - The extension denies non-allowlisted names before asking approval or invoking Granted. In `aws_bash`, explicit `--profile` and `AWS_PROFILE`/`AWS_DEFAULT_PROFILE` assignments are rejected in common shell forms, even for allowed names: select through `assume_profile` and omit profile flags.
-- In `aws_bash`, common `assume`/`assumego`/`granted` command invocations, `aws configure`, `aws sso login`/`logout`, and literal references to credential/policy paths are rejected. Plain `bash` is never checked.
+- In `aws_bash`, common `assume`/`assumego`/`granted` command invocations, `aws configure`, `aws sso login`/`logout`, literal references to credential/policy paths (absolute, `~/`, `$HOME/`, or `${HOME}/` spellings), and any mention of the `aws-assume.json` policy file name are rejected. Plain `bash` is never checked.
 - In projects with an active policy, built-in file reads under `~/.aws`/`~/.granted` and configured AWS file paths are blocked, and built-in writes/edits to these stores or the project/global `aws-assume.json` policies are blocked, including symlink aliases.
 - These checks are **not a shell parser, permission sandbox, or complete data-loss-prevention system**. Variables, encoded commands, aliases, indirect SDK calls, alternate credential locations, custom tools, file scanning from an ancestor directory, OS keychain access, or modifying extension code can bypass them. Host AWS default files and metadata endpoints are not made inaccessible merely by stripping environment variables. Do not promise that arbitrary assistant-run programs cannot access broader host credentials.
 - Credentials supplied to an `aws_bash` program are accessible to that program. It can print or exfiltrate them; generic shell output is not secretly filtered. Keeping credential-fetch output private does not guarantee that credentials can never appear in a transcript.

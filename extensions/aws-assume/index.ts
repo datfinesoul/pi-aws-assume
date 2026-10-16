@@ -9,14 +9,14 @@ import { Type } from "typebox";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AssumeError, fetchCredentials, findGranted, safeMessage } from "../../src/credentials.js";
 import { createGuards } from "../../src/guards.js";
-import { hasGlobPatterns, loadPolicyLayers } from "../../src/policy.js";
+import { hasGlobPatterns, loadPolicy } from "../../src/policy.js";
 import { discoverProfileNames, discoverProfileRegion } from "../../src/profiles.js";
 import { RoleSession } from "../../src/session.js";
 import { formatLocalExpiration } from "../../src/status.js";
 import { checkPiVersion, isUsableVersion } from "../../src/version.js";
 
 const AWS_BASH = "aws_bash";
-const NO_POLICY = "assume: this project has no AWS profile policy (.pi/aws-assume.json), or it allows no profiles, so the extension is inactive and plain bash is unchanged. Create the policy yourself outside Pi and /reload. See pi-aws-assume's README.md.";
+const NO_POLICY = "assume: this project has no AWS profile policy (.pi/aws-assume.json), or it defines no rules and selects no global rule IDs, so the extension is inactive and plain bash is unchanged. Create the policy yourself outside Pi and /reload. See pi-aws-assume's README.md.";
 // Namespace access: an older Pi without this export must not fail at import time.
 const piVersion = (piAgent as { VERSION?: unknown }).VERSION;
 
@@ -130,12 +130,12 @@ export default function assumeExtension(pi: ExtensionAPI) {
     reason = "assume requires project trust.";
     if (!ctx.isProjectTrusted()) return;
 
-    // Projects without a policy stay silent and untouched: no tool, guards, reminder, or bash change.
+    // Projects without effective rules stay silent and untouched: no tool, guards, reminder, or bash change.
     const policyPath = join(ctx.cwd, ".pi", "aws-assume.json");
     let patterns: readonly string[] = [];
     const globalPolicyPath = join(piAgent.getAgentDir(), "aws-assume.json");
     try {
-      patterns = loadPolicyLayers({
+      patterns = loadPolicy({
         bundledPath: fileURLToPath(new URL("./config.json", import.meta.url)),
         globalPath: globalPolicyPath,
         projectPath: policyPath,
