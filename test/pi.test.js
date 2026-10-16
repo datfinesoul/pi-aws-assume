@@ -1,0 +1,433 @@
+// Optional installed-Pi integration tests. Never invoke real Granted or an LLM.
+// PI_CODING_AGENT_ENTRY=/path/to/pi-coding-agent/dist/index.js node --test test/pi.test.js
+import test from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const entry = process.env.PI_CODING_AGENT_ENTRY;
+const extension = resolve(dirname(fileURLToPath(import.meta.url)), "../extensions/aws-assume/index.ts");
+
+async function setup(t, { mode = "tui", dependency = true, trusted = true,
+  profiles = ["test-a", "test-b"], configuredProfiles = ["test-a", "test-b"], writePolicy = true } = {}) {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-assume-integration-"));
+  const oldEnv = { ...process.env };
+  t.after(() => {
+    for (const key of Object.keys(process.env)) if (!(key in oldEnv)) delete process.env[key];
+    Object.assign(process.env, oldEnv);
+    rmSync(cwd, { recursive: true, force: true });
+  });
+  mkdirSync(join(cwd, ".pi"));
+  mkdirSync(join(cwd, "bin"));
+  if (writePolicy) writeFileSync(join(cwd, ".pi/aws-assume.json"), JSON.stringify({ profiles }));
+  // Discovery tests must never read the developer's real AWS configuration or credentials.
+  const configPath = join(cwd, "fake-aws-config");
+  const credentialsPath = join(cwd, "fake-aws-credentials");
+  // test-a has a configured region so region resolution can be checked end to end.
+  writeFileSync(configPath, configuredProfiles.map((name) => `[profile ${name}]\nsso_session=fake\n${name === "test-a" ? "region = us-west-2\n" : ""}`).join(""));
+  writeFileSync(credentialsPath, "[metadata-only]\naws_secret_access_key=FAKE_SECRET_METADATA\n");
+  const log = join(cwd, "calls");
+  // A guard regression must fail the test, never fall through to the user's real AWS CLI.
+  writeFileSync(join(cwd, "bin/aws"), "#!/bin/sh\necho 'fake aws must not be called' >&2\nexit 87\n", { mode: 0o755 });
+  if (dependency) writeFileSync(join(cwd, "bin/granted"), `#!${process.execPath}\nconst fs = require('node:fs');\nfs.appendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join('|')+'\\n');\nconsole.error('FAKE_SECRET_NEVER_FORWARD');\nconsole.log(JSON.stringify({Version:1,AccessKeyId:'FAKE_ACCESS',SecretAccessKey:'FAKE_SECRET',SessionToken:'FAKE_TOKEN',Expiration:new Date(Date.now()+3600000).toISOString()}));\n`, { mode: 0o755 });
+  // Exclude real Granted/AWS entirely, even if executable discovery regresses.
+  process.env.PATH = join(cwd, "bin");
+  process.env.PI_CODING_AGENT_DIR = join(cwd, "agent");
+  process.env.AWS_CONFIG_FILE = configPath;
+  process.env.AWS_SHARED_CREDENTIALS_FILE = credentialsPath;
+  process.env.AWS_PROFILE = "unapproved-inherited-profile";
+  process.env.AWS_SECRET_ACCESS_KEY = "FAKE_INHERITED_SECRET";
+  delete process.env.AWS_REGION;
+  delete process.env.AWS_DEFAULT_REGION;
+  delete process.env.BASH_ENV;
+  for (const key of Object.keys(process.env)) if (key.startsWith("BASH_FUNC_")) delete process.env[key];
+  const { loadExtensions, createExtensionRuntime } = await import(new URL("./core/extensions/loader.js", pathToFileURL(resolve(entry))));
+  const { initTheme } = await import(new URL("./modes/interactive/theme/theme.js", pathToFileURL(resolve(entry))));
+  initTheme("dark");
+  const runtime = createExtensionRuntime();
+  runtime.getSettings = () => ({ shellPath: "/bin/bash", shellCommandPrefix: "export PI_ASSUME_PREFIX_CHECK=ok" });
+  const loaded = await loadExtensions([extension], cwd, undefined, runtime);
+  assert.deepEqual(loaded.errors, []);
+  assert.equal(loaded.extensions.length, 1);
+  const ext = loaded.extensions[0];
+  const notices = [];
+  const widgets = new Map();
+  let prompts = 0;
+  let allow = true;
+  const ctx = {
+    cwd, mode, hasUI: mode === "tui", isProjectTrusted: () => trusted,
+    sessionManager: { getSessionId: () => "fake-session", getSessionFile: () => undefined,
+      getBranch: () => { throw new Error("Must not restore role state from history"); } },
+    ui: { custom: (factory) => new Promise((resolve) => {
+      let component;
+      component = factory({ requestRender() {} }, { fg: (_color, text) => text }, {}, (value) => {
+        component?.dispose();
+        resolve(value);
+      });
+    }), notify: (message) => notices.push(message), setStatus: () => {},
+      setWidget: (key, factory) => { if (factory) widgets.set(key, factory); else widgets.delete(key); },
+      confirm: async () => { prompts++; return allow; }, select: async () => "test-a" },
+    waitForIdle: async () => {},
+  };
+  const emit = async (event, extra = {}) => {
+    const results = [];
+    for (const handler of ext.handlers.get(event) ?? []) results.push(await handler({ type: event, ...extra }, ctx));
+    return results;
+  };
+  const tool = (name) => ext.tools.get(name)?.definition;
+  const call = (action, profile, offset) => tool("assume_profile").execute("test-call", { action, profile, offset }, undefined, undefined, ctx);
+  const metadata = async () => JSON.parse((await call("status")).content[0].text);
+  const count = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").length : 0;
+  const shell = (command) => tool("aws_bash").execute("test-shell", { command }, undefined, undefined, ctx);
+  await emit("session_start", { reason: "startup" });
+  t.after(async () => { await emit("session_shutdown"); });
+  return { cwd, configPath, log, emit, tool, call, metadata, count, shell, notices, widgets, ctx, ext,
+    prompts: () => prompts, deny: () => { allow = false; } };
+}
+
+test("Pi loads the extension without session-side effects", { skip: !entry }, async (t) => {
+  const env = await setup(t, { mode: "print" });
+  assert.equal(env.tool("assume_profile").exposure, "hidden");
+  assert.equal(env.tool("aws_bash").exposure, "hidden");
+  assert.equal(env.tool("bash"), undefined);
+  assert.equal(env.count(), 0);
+  await assert.rejects(env.call("assume", "test-a"), /disabled outside interactive/);
+});
+
+test("missing Granted notifies and leaves shell/guards untouched", { skip: !entry || process.platform !== "darwin" }, async (t) => {
+  const env = await setup(t, { dependency: false });
+  assert.equal(env.tool("assume_profile").exposure, "hidden");
+  assert.equal(env.tool("aws_bash").exposure, "hidden");
+  assert.equal(env.tool("bash"), undefined);
+  assert.equal(env.count(), 0);
+  assert.ok(env.notices.some((text) => /not installed/.test(text)));
+  assert.deepEqual(await env.emit("tool_call", { toolName: "read", input: { path: "~/.aws/credentials" } }), [undefined]);
+});
+
+test("untrusted project remains inert", { skip: !entry }, async (t) => {
+  const env = await setup(t, { trusted: false });
+  assert.equal(env.tool("assume_profile").exposure, "hidden");
+  assert.equal(env.tool("aws_bash").exposure, "hidden");
+  assert.equal(env.tool("bash"), undefined);
+  assert.equal(env.count(), 0);
+});
+
+for (const [label, options] of [["missing", { writePolicy: false }], ["empty", { profiles: [] }]]) {
+  test(`${label} policy keeps the extension silent and inactive`, { skip: !entry || process.platform !== "darwin" }, async (t) => {
+    const env = await setup(t, options);
+    assert.equal(env.tool("assume_profile").exposure, "hidden");
+    assert.equal(env.tool("aws_bash").exposure, "hidden");
+    assert.equal(env.tool("bash"), undefined);
+    assert.deepEqual(env.notices, []);
+    assert.equal(env.widgets.has("assume"), false);
+    assert.deepEqual(await env.emit("tool_call", { toolName: "read", input: { path: "~/.aws/credentials" } }), [undefined]);
+    assert.deepEqual(await env.emit("tool_call", { toolName: "write", input: { path: ".pi/aws-assume.json" } }), [undefined]);
+    assert.deepEqual(await env.emit("before_agent_start"), [undefined]);
+    await env.ext.commands.get("assume").handler("status", env.ctx);
+    assert.match(env.notices.at(-1), /no AWS profile policy/);
+    await assert.rejects(env.call("assume", "test-a"), /no AWS profile policy/);
+    assert.equal(env.count(), 0);
+  });
+}
+
+test("reminder is injected only when the active profile changes", { skip: !entry || process.platform !== "darwin" }, async (t) => {
+  const env = await setup(t);
+  const reminder = async () => (await env.emit("before_agent_start"))[0]?.message?.content;
+  assert.match(await reminder(), /active \/assume profile is none/);
+  assert.equal(await reminder(), undefined);
+  await env.call("assume", "test-a");
+  assert.match(await reminder(), /active \/assume profile is test-a/);
+  assert.equal(await reminder(), undefined);
+  await env.emit("session_start", { reason: "reload" });
+  assert.match(await reminder(), /profile is none/);
+});
+
+test("interactive Pi integration: approval, private credentials, shell environment, and all session reset reasons", {
+  skip: !entry || process.platform !== "darwin",
+}, async (t) => {
+  const env = await setup(t);
+  assert.equal(env.count(), 0);
+  assert.equal((await env.metadata()).activeProfile, null);
+  assert.equal(env.tool("assume_profile").exposure, "model-only");
+  assert.equal(env.tool("aws_bash").exposure, "model-only");
+  assert.equal(env.tool("bash"), undefined, "plain bash is never replaced");
+  const command = `${JSON.stringify(process.execPath)} -e 'console.log(JSON.stringify({active:process.env.AWS_ACCESS_KEY_ID === "FAKE_ACCESS",inherited:!!process.env.AWS_PROFILE,secret:!!process.env.AWS_SECRET_ACCESS_KEY,region:process.env.AWS_REGION,prefix:process.env.PI_ASSUME_PREFIX_CHECK,session:process.env.PI_SESSION_ID}))'`;
+  // Without an active profile, aws_bash refuses instead of falling back to ambient/default credentials.
+  await assert.rejects(env.shell(command), /No AWS profile is active/);
+  await assert.rejects(env.call("assume", "admin"), /allowlist/);
+  assert.equal(env.prompts(), 0);
+  const activation = await env.call("assume", "test-a");
+  assert.ok(!JSON.stringify(activation).includes("FAKE_SECRET"));
+  assert.equal(env.prompts(), 1);
+  assert.equal(env.count(), 1);
+  const active = await env.shell(command);
+  assert.deepEqual(JSON.parse(active.content[0].text), { active: true, inherited: false, secret: true, region: "us-west-2", prefix: "ok", session: "fake-session" });
+  await env.call("assume", "test-a");
+  assert.equal(env.prompts(), 1);
+  assert.equal(env.count(), 1);
+  await env.ext.commands.get("assume").handler("use test-b", env.ctx);
+  await env.call("assume", "test-b");
+  assert.equal(env.prompts(), 1);
+  await env.call("clear");
+  assert.equal((await env.metadata()).activeProfile, null);
+  await assert.rejects(env.shell(command), /No AWS profile is active/);
+  for (const reason of ["reload", "new", "resume", "fork"]) {
+    await env.call("assume", "test-a");
+    const previousCalls = env.count();
+    await env.emit("session_start", { reason });
+    assert.equal(env.count(), previousCalls, `${reason} must not authenticate`);
+    assert.equal((await env.metadata()).activeProfile, null);
+    assert.deepEqual((await env.metadata()).approvedProfiles, []);
+  }
+  const blocked = await env.emit("tool_call", { toolName: "write", input: { path: ".pi/aws-assume.json" } });
+  assert.equal(blocked[0].block, true);
+  await env.call("assume", "test-b");
+  await assert.rejects(env.shell("aws --profile admin s3 ls"), /omit --profile/);
+  const region = await env.shell(`${JSON.stringify(process.execPath)} -e 'console.log(process.env.AWS_REGION)'`);
+  assert.equal(region.content[0].text.trim(), "us-east-1", "no inherited or profile region falls back to us-east-1");
+  assert.ok(!env.notices.join("\n").includes("FAKE_SECRET"));
+});
+
+test("path glob integration lists/picks concrete matches and forwards only approved names", {
+  skip: !entry || process.platform !== "darwin",
+}, async (t) => {
+  const env = await setup(t, { profiles: ["glg/*/readonly", "glg/**/audit"], configuredProfiles: [
+    "glg/a/readonly", "glg/b/readonly", "glg/org/team/readonly", "glg/org/team/audit", "other/a/readonly",
+  ] });
+  const names = ["glg/a/readonly", "glg/b/readonly", "glg/org/team/audit"];
+  assert.deepEqual(JSON.parse((await env.call("list")).content[0].text).profiles, names);
+  const completions = await env.ext.commands.get("assume").getArgumentCompletions("use glg/");
+  assert.deepEqual(completions.map((item) => item.value), names.map((name) => `use ${name}`));
+  let picker;
+  env.ctx.ui.select = async (_title, options) => { picker = options; return options[0]; };
+  await env.ext.commands.get("assume").handler("", env.ctx);
+  assert.deepEqual(picker, names);
+  assert.equal(env.prompts(), 0); // User selection counts only for this concrete profile.
+  await env.call("assume", "glg/b/readonly");
+  assert.equal(env.prompts(), 1);
+  await env.call("assume", "glg/a/readonly");
+  assert.equal(env.prompts(), 1);
+  await assert.rejects(env.call("assume", "glg/*/readonly"), /concrete profile/);
+  await assert.rejects(env.call("assume", "glg/org/team/readonly"), /allowlist/);
+  assert.equal(env.count(), 3);
+  assert.ok(!readFileSync(env.log, "utf8").includes("*"));
+  assert.ok(!JSON.stringify(await env.metadata()).includes("FAKE_SECRET"));
+  assert.ok(!env.notices.join("\n").includes("FAKE_SECRET"));
+  writeFileSync(env.configPath, "[profile glg/new/readonly]\nsso_session=fake\n");
+  await env.emit("session_start", { reason: "reload" });
+  assert.equal(env.count(), 3); // Discovery/reload never authenticates.
+  assert.deepEqual(JSON.parse((await env.call("list")).content[0].text).profiles, ["glg/new/readonly"]);
+  assert.equal((await env.metadata()).activeProfile, null);
+  assert.deepEqual((await env.metadata()).approvedProfiles, []);
+});
+
+test("large wildcard match lists are paginated without exposing nonmatching names", {
+  skip: !entry || process.platform !== "darwin",
+}, async (t) => {
+  const names = Array.from({ length: 205 }, (_, n) => `glg/team-${String(n).padStart(3, "0")}/readonly`);
+  const env = await setup(t, { profiles: ["glg/*/readonly"], configuredProfiles: [...names, "other/private/admin"] });
+  const first = JSON.parse((await env.call("list")).content[0].text);
+  assert.deepEqual(first.profiles, names.slice(0, 100));
+  assert.equal(first.totalProfiles, 205);
+  assert.equal(first.nextOffset, 100);
+  const last = JSON.parse((await env.call("list", undefined, 200)).content[0].text);
+  assert.deepEqual(last.profiles, names.slice(200));
+  assert.equal(last.nextOffset, null);
+  await env.ext.commands.get("assume").handler("list 200", env.ctx);
+  assert.deepEqual(JSON.parse(env.notices.at(-1)).profiles, names.slice(200));
+  assert.equal((await env.metadata()).profiles.length, 100);
+  assert.equal(env.count(), 0);
+});
+
+test("no matching glob profiles gives an empty picker result without auth or wildcard execution", {
+  skip: !entry || process.platform !== "darwin",
+}, async (t) => {
+  const env = await setup(t, { profiles: ["glg/**"], configuredProfiles: ["other/private/admin"] });
+  env.ctx.ui.select = async () => { throw new Error("An empty picker must not open"); };
+  await env.ext.commands.get("assume").handler("", env.ctx);
+  assert.deepEqual(JSON.parse((await env.call("list")).content[0].text).profiles, []);
+  assert.equal(env.count(), 0);
+  await assert.rejects(env.call("assume", "glg/**"), /concrete profile/);
+  assert.equal(env.count(), 0);
+});
+
+test("declining assistant approval never invokes Granted, but user selection counts", {
+  skip: !entry || process.platform !== "darwin",
+}, async (t) => {
+  const env = await setup(t);
+  env.deny();
+  await assert.rejects(env.call("assume", "test-a"), /declined/);
+  assert.equal(env.count(), 0);
+  assert.deepEqual((await env.metadata()).approvedProfiles, []);
+  await env.ext.commands.get("assume").handler("use test-a", env.ctx);
+  await env.call("assume", "test-a");
+  assert.equal(env.count(), 1);
+  assert.equal(env.prompts(), 1);
+});
+
+test("clear between environment preparation and spawn cannot launch stale credentials", {
+  skip: !entry || process.platform !== "darwin",
+}, async (t) => {
+  const env = await setup(t);
+  await env.call("assume", "test-a");
+  const pending = env.shell(`${JSON.stringify(process.execPath)} -e 'require("node:fs").writeFileSync("marker", "ran")'`);
+  queueMicrotask(() => { void env.call("clear"); });
+  await assert.rejects(pending, /context changed|cancelled/);
+  assert.equal(existsSync(join(env.cwd, "marker")), false);
+});
+
+test("late user selector result cannot authenticate after session replacement", {
+  skip: !entry || process.platform !== "darwin",
+}, async (t) => {
+  const env = await setup(t);
+  let choose;
+  let ready;
+  const entered = new Promise((r) => { ready = r; });
+  env.ctx.ui.select = () => { ready(); return new Promise((r) => { choose = r; }); };
+  const command = env.ext.commands.get("assume").handler("", env.ctx);
+  await entered;
+  await env.emit("session_start", { reason: "resume" });
+  choose("test-a");
+  await command;
+  assert.equal(env.count(), 0);
+  assert.equal((await env.metadata()).activeProfile, null);
+});
+
+test("authentication loader cancels command/tool work and preserves the previous role", {
+  skip: !entry || process.platform !== "darwin", timeout: 10000,
+}, async (t) => {
+  const env = await setup(t);
+  await env.call("assume", "test-a");
+  writeFileSync(join(env.cwd, "bin/granted"), `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
+  for (const method of ["escape", "tool-abort", "cancel", "shutdown"]) {
+    const controller = new AbortController();
+    env.ctx.ui.custom = (factory) => new Promise((resolve) => {
+      const loader = factory({ requestRender() {} }, { fg: (_color, text) => text }, {}, (value) => {
+        loader.dispose();
+        resolve(value);
+      });
+      setTimeout(() => {
+        if (method === "escape") loader.handleInput("\u001b");
+        else if (method === "tool-abort") controller.abort();
+        else if (method === "cancel") void env.ext.commands.get("assume").handler("cancel", env.ctx);
+        else void env.emit("session_shutdown");
+      }, 50);
+    });
+    if (method === "escape") {
+      await env.ext.commands.get("assume").handler("use test-b", env.ctx);
+      assert.ok(env.notices.some((text) => /cancelled/.test(text)));
+    } else {
+      await assert.rejects(env.tool("assume_profile").execute("pending", { action: "assume", profile: "test-b" },
+        controller.signal, undefined, env.ctx), /cancelled/);
+    }
+    if (method !== "shutdown") assert.equal((await env.metadata()).activeProfile, "test-a");
+  }
+});
+
+test("command authentication closes its loader after the default one-minute timeout", {
+  skip: !entry || process.platform !== "darwin", timeout: 10000,
+}, async (t) => {
+  const env = await setup(t);
+  writeFileSync(join(env.cwd, "bin/granted"), `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
+  const { InteractiveMode } = await import(new URL("./modes/interactive/interactive-mode.js", pathToFileURL(resolve(entry))));
+  const editor = { getText: () => "", setText() {} };
+  let focused;
+  let ready;
+  const installed = new Promise((resolve) => { ready = resolve; });
+  const countdownValues = new Set();
+  let renders = 0;
+  // Exercise Pi's actual custom-screen installation, restoration, and disposal, not our UI mock.
+  const host = {
+    editor, ui: { requestRender() {
+      renders++;
+      if (focused && focused !== editor) {
+        const lines = focused.render(160);
+        const text = lines.join("\n");
+        const match = /Authentication timeout in (\d+)s/.exec(text);
+        if (match) {
+          countdownValues.add(Number(match[1]));
+          const countdownLine = lines.findIndex((line) => line.includes("Authentication timeout in"));
+          assert.ok(lines.slice(0, countdownLine).some((line) => line.includes("─")), "countdown is below the top border");
+          assert.ok(lines.slice(countdownLine + 1).some((line) => line.includes("─")), "countdown is above the bottom border");
+        }
+      }
+    }, setFocus(component) { focused = component; if (component !== editor) ready(); } },
+    editorContainer: { clear() {}, addChild() {} },
+    disposeActiveSelector() {}, keybindings: {},
+  };
+  env.ctx.ui.custom = (factory) => InteractiveMode.prototype.showExtensionCustom.call(host, factory);
+  // Keep the production deadline, but advance virtual time instead of waiting a real minute.
+  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: Date.now() });
+  const started = Date.now();
+  const pending = env.ext.commands.get("assume").handler("use test-a", env.ctx);
+  await installed;
+  t.mock.timers.tick(1000);
+  assert.ok(countdownValues.has(59), "countdown updates after one virtual second");
+  t.mock.timers.tick(58999);
+  assert.notEqual(focused, editor, "authentication must remain open before the deadline");
+  t.mock.timers.tick(1);
+  await pending;
+  const elapsed = Date.now() - started;
+  assert.equal(focused, editor, "timeout must restore focus to the editor");
+  assert.ok(countdownValues.has(60), "countdown starts at 60 seconds");
+  assert.ok(countdownValues.has(59), "countdown updates while waiting");
+  const finalRenders = renders;
+  t.mock.timers.tick(350);
+  assert.equal(renders, finalRenders, "countdown and spinner stop rendering after timeout");
+  assert.equal(elapsed, 60000, "production timeout remains one minute");
+  assert.ok(env.notices.some((text) => /timed out/.test(text)));
+  assert.equal((await env.metadata()).activeProfile, null);
+});
+
+test("AWS row right-aligns local-time expiry and stays within narrow terminal widths", {
+  skip: !entry || process.platform !== "darwin",
+}, async (t) => {
+  const env = await setup(t);
+  const { visibleWidth } = await import(new URL("../../pi-tui/dist/index.js", pathToFileURL(resolve(entry))));
+  const row = () => env.widgets.get("assume")({}, { fg: (_color, text) => text });
+  assert.equal(env.widgets.has("assume"), false);
+  await env.call("status");
+  await env.call("clear");
+  assert.equal(env.widgets.has("assume"), false);
+  await assert.rejects(env.call("assume", "admin"), /allowlist/);
+  env.deny();
+  await assert.rejects(env.call("assume", "test-a"), /declined/);
+  assert.equal(env.widgets.has("assume"), false);
+  // Explicit user selection succeeds even after an assistant approval was declined.
+  await env.ext.commands.get("assume").handler("use test-a", env.ctx);
+  const metadata = await env.metadata();
+  const { formatLocalExpiration } = await import("../src/status.js");
+  const expected = `Expires ${formatLocalExpiration(metadata.expiresAt)}`;
+  const line = row().render(120)[0];
+  assert.ok(line.startsWith("AWS: test-a"));
+  assert.ok(line.endsWith(expected));
+  assert.equal(line.length, 120);
+  for (const width of [0, 1, 10, 40]) assert.ok(visibleWidth(row().render(width)[0]) <= width);
+  await env.call("clear");
+  assert.equal(row().render(120)[0].trim(), "AWS: none");
+  for (const reason of ["reload", "new", "resume", "fork"]) {
+    await env.emit("session_start", { reason });
+    await env.call("status");
+    assert.equal(env.widgets.has("assume"), false, `${reason} hides the row until assumption`);
+    await env.ext.commands.get("assume").handler("use test-a", env.ctx);
+    assert.ok(row().render(120)[0].startsWith("AWS: test-a"));
+  }
+  await env.emit("session_shutdown");
+  assert.equal(env.widgets.has("assume"), false);
+});
+
+test("invalid policy fails closed, reports the error without content, and stays inactive", {
+  skip: !entry || process.platform !== "darwin",
+}, async (t) => {
+  const env = await setup(t);
+  writeFileSync(join(env.cwd, ".pi/aws-assume.json"), '{"profiles":["*"],"other":"FAKE_SECRET"}');
+  await env.emit("session_start", { reason: "reload" });
+  await assert.rejects(env.call("assume", "test-a"), /aws-assume\.json/);
+  assert.equal(env.tool("aws_bash").exposure, "hidden");
+  assert.equal(env.tool("assume_profile").exposure, "hidden");
+  assert.equal(env.count(), 0);
+  assert.ok(env.notices.some((text) => /aws-assume\.json/.test(text)));
+  assert.ok(!env.notices.join("\n").includes("FAKE_SECRET"));
+});

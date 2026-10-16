@@ -1,0 +1,35 @@
+{
+  "name": "@datfinesoul/pi-aws-assume",
+  "version": "0.1.0",
+  "description": "A Pi extension that selects project-allowed AWS IAM Identity Center profiles through Granted.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Philip Hadviger <613305+datfinesoul@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/datfinesoul/pi-aws-assume.git"
+  },
+  "homepage": "https://github.com/datfinesoul/pi-aws-assume#readme",
+  "bugs": {
+    "url": "https://github.com/datfinesoul/pi-aws-assume/issues"
+  },
+  "keywords": ["pi-package", "pi-extension", "aws-assume"],
+  "files": ["extensions/", "src/", "CHANGELOG.md", "LICENSE", "README.md"],
+  "scripts": {
+    "test": "node --test",
+    "check": "node --test",
+    "pack:check": "node scripts/pack-check.mjs"
+  },
+  "pi": {
+    "extensions": ["./extensions/aws-assume/index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

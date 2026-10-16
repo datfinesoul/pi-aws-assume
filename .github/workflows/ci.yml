@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**"
+      - "!**/*.md"
+      - "extensions/**/*.md"
+  pull_request:
+    paths:
+      - "**"
+      - "!**/*.md"
+      - "extensions/**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node.js ${{ matrix.node-version }} (${{ matrix.package-manager }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - "22.19"
+          - "24"
+          - "26"
+        package-manager:
+          - npm
+          - pnpm
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up pnpm
+        if: matrix.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Run tests
+        run: ${{ matrix.package-manager }} run test
+      - name: Validate package contents
+        run: ${{ matrix.package-manager }} run pack:check
