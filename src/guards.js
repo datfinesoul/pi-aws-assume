@@ -10,11 +10,12 @@ function canonical(path) {
   }
 }
 
-export function createGuards({ cwd, home, policyPath, env = process.env }) {
+export function createGuards({ cwd, home, policyPath, additionalPolicyPaths = [], env = process.env }) {
   const expand = (path) => resolve(cwd, path === "~" ? home : path.startsWith("~/") ? join(home, path.slice(2)) : path);
   const stores = [join(home, ".aws"), join(home, ".granted"),
     env.AWS_CONFIG_FILE, env.AWS_SHARED_CREDENTIALS_FILE].filter(Boolean).map(expand);
-  const readOnly = [policyPath, ...stores].filter(Boolean).map(expand);
+  const policies = [policyPath, ...additionalPolicyPaths].filter(Boolean).map(expand);
+  const readOnly = [...policies, ...stores];
   const within = (path, root) => {
     const rel = relative(root, path);
     return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
@@ -46,7 +47,7 @@ export function createGuards({ cwd, home, policyPath, env = process.env }) {
     if (/(?:^|\s)--profile(?:[=\s]|$)|\bAWS_(?:DEFAULT_)?PROFILE\s*=/.test(command)) {
       return "assume: aws_bash uses the selected profile; omit --profile and AWS_PROFILE. Select another profile through assume_profile.";
     }
-    const sensitive = [...stores, policyPath].filter(Boolean);
+    const sensitive = [...stores, ...policies];
     // Match .aws/.granted only as a whole path segment, not names such as .aws-sdk.
     if (/(?:~\/|\$HOME\/|\$\{HOME\}\/|\/)\.(?:aws|granted)(?=[/\s'";|&)]|$)/m.test(command) ||
         sensitive.some((path) => command.includes(path)) || command.includes(".pi/aws-assume.json") ||

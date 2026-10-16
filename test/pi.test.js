@@ -11,7 +11,8 @@ const entry = process.env.PI_CODING_AGENT_ENTRY;
 const extension = resolve(dirname(fileURLToPath(import.meta.url)), "../extensions/aws-assume/index.ts");
 
 async function setup(t, { mode = "tui", dependency = true, trusted = true,
-  profiles = ["test-a", "test-b"], configuredProfiles = ["test-a", "test-b"], writePolicy = true } = {}) {
+  profiles = ["test-a", "test-b"], configuredProfiles = ["test-a", "test-b"], writePolicy = true,
+  globalPolicy, projectEnabled } = {}) {
   const cwd = mkdtempSync(join(tmpdir(), "pi-assume-integration-"));
   const oldEnv = { ...process.env };
   t.after(() => {
@@ -21,7 +22,9 @@ async function setup(t, { mode = "tui", dependency = true, trusted = true,
   });
   mkdirSync(join(cwd, ".pi"));
   mkdirSync(join(cwd, "bin"));
-  if (writePolicy) writeFileSync(join(cwd, ".pi/aws-assume.json"), JSON.stringify({ profiles }));
+  if (writePolicy) writeFileSync(join(cwd, ".pi/aws-assume.json"), JSON.stringify({ profiles, enabled: projectEnabled }));
+  mkdirSync(join(cwd, "agent"));
+  if (globalPolicy) writeFileSync(join(cwd, "agent/aws-assume.json"), JSON.stringify(globalPolicy));
   // Discovery tests must never read the developer's real AWS configuration or credentials.
   const configPath = join(cwd, "fake-aws-config");
   const credentialsPath = join(cwd, "fake-aws-credentials");
@@ -131,6 +134,45 @@ for (const [label, options] of [["missing", { writePolicy: false }], ["empty", {
     assert.equal(env.count(), 0);
   });
 }
+
+test("global defaults need project opt-in and project ID overrides control eligible profiles", {
+  skip: !entry || process.platform !== "darwin",
+}, async (t) => {
+  const env = await setup(t, { writePolicy: false,
+    globalPolicy: { profiles: [{ id: "readonly", pattern: "test-a" }, "test-b"] } });
+  assert.equal(env.tool("aws_bash").exposure, "hidden");
+  assert.deepEqual(env.notices, []);
+  writeFileSync(join(env.cwd, ".pi/aws-assume.json"), JSON.stringify({ enabled: true, profiles: [] }));
+  await env.emit("session_start", { reason: "reload" });
+  assert.deepEqual((await env.metadata()).profiles, ["test-a", "test-b"]);
+  await env.call("assume", "test-a");
+  assert.equal(env.prompts(), 1);
+  const globalPath = join(env.cwd, "agent/aws-assume.json");
+  assert.equal((await env.emit("tool_call", { toolName: "edit", input: { path: globalPath } }))[0].block, true);
+  writeFileSync(join(env.cwd, ".pi/aws-assume.json"), JSON.stringify({ enabled: true, profiles: [
+    { id: "readonly", pattern: "test-c" }, { id: "test-b", enabled: false },
+  ] }));
+  await env.emit("session_start", { reason: "reload" });
+  assert.deepEqual((await env.metadata()).profiles, ["test-c"]);
+  assert.deepEqual((await env.metadata()).approvedProfiles, []);
+  assert.equal((await env.metadata()).activeProfile, null);
+  await assert.rejects(env.call("assume", "test-a"), /allowlist/);
+  await env.call("assume", "test-c");
+  assert.equal(env.prompts(), 2);
+  writeFileSync(globalPath, "FAKE_SECRET");
+  await env.emit("session_start", { reason: "reload" });
+  assert.equal(env.tool("aws_bash").exposure, "hidden");
+  assert.ok(!env.notices.join("\n").includes("FAKE_SECRET"));
+});
+
+test("explicit project disable wins over global and local rules", {
+  skip: !entry || process.platform !== "darwin",
+}, async (t) => {
+  const env = await setup(t, { projectEnabled: false, globalPolicy: { profiles: ["test-a"] } });
+  assert.equal(env.tool("aws_bash").exposure, "hidden");
+  assert.equal(env.count(), 0);
+  assert.deepEqual(env.notices, []);
+});
 
 test("reminder is injected only when the active profile changes", { skip: !entry || process.platform !== "darwin" }, async (t) => {
   const env = await setup(t);
