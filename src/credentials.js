@@ -85,6 +85,8 @@ export function fetchCredentials(executable, profile, { signal, env = process.en
     const child = spawn(executable, ["credential-process", "--profile", profile, "--window", "5m", "--auto-login"], {
       // stderr is discarded: Granted launches the browser with its own stderr, so piping it here
       // lets an open browser hold the pipe and delay the 'close' event long after Granted exits.
+      // detached keeps Granted and the browser it launches out of Pi's process group, so terminal
+      // signals aimed at Pi do not reach them. Only this pid is ever signalled, never the group.
       env: grantedEnvironment(env), stdio: ["ignore", "pipe", "ignore"], detached: process.platform !== "win32",
     });
     let output = "";

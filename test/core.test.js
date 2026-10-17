@@ -497,7 +497,9 @@ browser.unref();
 writeFileSync(${JSON.stringify(pidFile)}, String(browser.pid));
 console.log(JSON.stringify(${JSON.stringify(wire())}));
 `, { mode: 0o755 });
-  t.after(() => { try { process.kill(Number(readFileSync(pidFile, "utf8"))); } catch { /* already gone */ } });
+  t.after(() => {
+    try { const pid = Number(readFileSync(pidFile, "utf8")) || 0; if (pid > 0) process.kill(pid); } catch { /* Already exited. */ }
+  });
   const value = await fetchCredentials(executable, "dev", { timeoutMs: 5000 });
   assert.equal(value.accessKeyId, "FAKE_ACCESS");
 });
@@ -514,9 +516,18 @@ const browser = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
 writeFileSync(${JSON.stringify(pidFile)}, String(browser.pid));
 setInterval(() => {}, 1000);
 `, { mode: 0o755 });
-  const browserPid = () => Number(readFileSync(pidFile, "utf8"));
-  t.after(() => { try { process.kill(browserPid()); } catch { /* Already exited. */ } });
-  await assert.rejects(fetchCredentials(executable, "dev", { timeoutMs: 300 }), /timed out/);
+  const browserPid = () => { try { return Number(readFileSync(pidFile, "utf8")) || 0; } catch { return 0; } };
+  // Never signal pid 0: that would target the test runner's own process group.
+  t.after(() => { const pid = browserPid(); if (pid > 0) try { process.kill(pid); } catch { /* Already exited. */ } });
+  // Cancel only after the fake browser exists, since Node startup can exceed a short fixed timeout.
+  const controller = new AbortController();
+  const pending = fetchCredentials(executable, "dev", { signal: controller.signal, timeoutMs: 30000 });
+  for (let waited = 0; !browserPid(); waited += 20) {
+    assert.ok(waited < 10000, "fake Granted did not launch its browser");
+    await delay(20);
+  }
+  controller.abort();
+  await assert.rejects(pending, /cancelled/);
   // Give a process-group signal time to take effect before asserting the browser survived.
   await delay(200);
   assert.doesNotThrow(() => process.kill(browserPid(), 0), "the browser launched by Granted must survive cancellation");
