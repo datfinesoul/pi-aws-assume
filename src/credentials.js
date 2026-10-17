@@ -91,14 +91,16 @@ export function fetchCredentials(executable, profile, { signal, env = process.en
     let bytes = 0;
     let failure;
     let settled = false;
+    let escalation;
     const kill = (message) => {
       if (settled) return;
       failure = new AssumeError(message);
-      try {
-        if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
-        else child.kill("SIGKILL");
-      } catch { /* Process may already have exited. */ }
-      // Detached descendants must not hold inherited pipes open after cancellation/timeout.
+      // Signal Granted only, never its process group: on Linux the login browser is a descendant
+      // in that group, so a group signal would close every browser window and tab. The stdout pipe
+      // is destroyed below, so an orphaned descendant cannot keep completion pending.
+      try { child.kill("SIGTERM"); } catch { /* Process may already have exited. */ }
+      escalation = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* Already exited. */ } }, 2000);
+      escalation.unref?.();
       child.stdout.destroy();
       finish(failure);
     };
@@ -120,6 +122,7 @@ export function fetchCredentials(executable, profile, { signal, env = process.en
     });
     child.once("error", () => finish(new AssumeError("Cannot execute Granted. Check that it is still installed and executable.")));
     child.once("close", (code) => {
+      clearTimeout(escalation);
       if (failure) { finish(failure); return; }
       if (code !== 0) { finish(new AssumeError(`Granted failed (exit ${code ?? "signal"}); raw output withheld. Check Granted setup outside Pi.`)); return; }
       try { finish(undefined, parseCredentials(output)); } catch (error) { finish(error); }

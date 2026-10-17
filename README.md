@@ -16,7 +16,7 @@ Requirements:
 
 - **[Granted CLI](https://github.com/fwdcloudsec/granted)** installed and on Pi's `PATH`, with your IAM Identity Center profiles already configured. Follow [Granted's setup guide](https://docs.granted.dev/getting-started) first; this extension does not install it or replace its authentication.
 - **Interactive Pi 1.x, version 1.2.0 or newer.** See [Pi version compatibility](#pi-version-compatibility).
-- **macOS or Linux.** Role access requires interactive mode; JSON, print, and RPC modes are unsupported. Status diagnostics remain available wherever the extension loads. Live Granted login is verified on macOS; Linux support is present but not yet verified.
+- **macOS or Linux.** Role access requires interactive mode; JSON, print, and RPC modes are unsupported. Status diagnostics remain available wherever the extension loads. Linux support is newer and less widely exercised than macOS.
 
 In a project with a policy, startup checks for Granted without invoking it. If missing, the extension notifies once and role access stays unavailable; status diagnostics remain.
 
@@ -290,6 +290,7 @@ Failed refresh prevents the pending shell command from executing with stale cred
 - These checks are **not a shell parser, permission sandbox, or complete data-loss-prevention system**. Variables, encoded commands, aliases, indirect SDK calls, alternate credential locations, custom tools, file scanning from an ancestor directory, OS keychain access, or modifying extension code can bypass them. Host AWS default files and metadata endpoints are not made inaccessible merely by stripping environment variables. Do not promise that arbitrary assistant-run programs cannot access broader host credentials.
 - Credentials supplied to an `aws_bash` program are accessible to that program. It can print or exfiltrate them; generic shell output is not secretly filtered. Keeping credential-fetch output private does not guarantee that credentials can never appear in a transcript.
 - Profile names are allowlisted, not pinned AWS account/role identities. User-side changes to AWS configuration or Granted caches can affect what a name resolves to. No AWS identity verification call is made.
+- **A browser is required for sign-in.** In a headless or SSH session without a display, Granted cannot open the login page, and the URL it prints is withheld with the rest of the credential-process output. The attempt then waits until the authentication timeout with no visible prompt. Authenticate with Granted on a machine with a browser first, then retry.
 - Direct `aws sts assume-role` calls remain governed by AWS permissions, **without extension destination allowlisting or first-use approval**, by design. This extension does not offer a chaining interface and does not adopt credentials obtained by those calls.
 - `aws_bash` runs commands locally through Pi's bash implementation. Other execution tools and remote backends are not covered.
 - No AWS web-console sessions, profile CRUD, standalone SSO implementation, or isolation dependency are included. Actual AWS/SSO authentication has not been exercised by automated tests.
@@ -316,7 +317,7 @@ For an installed-Pi loader/command/tool smoke test, point `PI_CODING_AGENT_ENTRY
 PI_CODING_AGENT_ENTRY=/path/to/pi-coding-agent/dist/index.js npm test
 ```
 
-Without this variable, installed-Pi tests are skipped. Interactive integration tests target Pi 1.2.0 and run on macOS and Linux, and do not yet run in CI; run them locally before a release. Authentication tests use fake Granted executables and credentials in temporary directories—no model requests, real AWS credentials, or role assumptions. Live Granted authentication remains a user-run smoke test; the prototype was developed with Granted 0.38.0.
+Without this variable, installed-Pi tests are skipped. Interactive integration tests target Pi 1.2.0 and run on macOS and Linux when it is set; they do not run in CI, so run them locally before a release. Authentication tests use fake Granted executables and credentials in temporary directories—no model requests, real AWS credentials, or role assumptions. Live Granted authentication remains a user-run smoke test; the prototype was developed with Granted 0.38.0.
 
 Every pull request that triggers CI must bump `version` in `package.json` and move the `Unreleased` changelog entries under a matching `## [<version>] - <date>` heading; CI fails otherwise. Pull requests that change only Markdown skipped by CI are exempt. After the merge to `main` passes CI, the Release workflow tags that commit `v<version>`. Merges that do not change the version are not tagged.
 

@@ -501,6 +501,26 @@ console.log(JSON.stringify(${JSON.stringify(wire())}));
   const value = await fetchCredentials(executable, "dev", { timeoutMs: 5000 });
   assert.equal(value.accessKeyId, "FAKE_ACCESS");
 });
+test("cancelling the credential subprocess does not kill the browser it launched", async (t) => {
+  const bin = temporary(t);
+  const executable = join(bin, "granted");
+  const pidFile = join(bin, "browser.pid");
+  // On Linux the login browser is a descendant in Granted's process group, so cancelling or
+  // timing out must signal Granted alone or the browser and all of its windows and tabs are lost.
+  writeFileSync(executable, `#!${process.execPath}
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const browser = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "ignore", "ignore"] });
+writeFileSync(${JSON.stringify(pidFile)}, String(browser.pid));
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+  const browserPid = () => Number(readFileSync(pidFile, "utf8"));
+  t.after(() => { try { process.kill(browserPid()); } catch { /* Already exited. */ } });
+  await assert.rejects(fetchCredentials(executable, "dev", { timeoutMs: 300 }), /timed out/);
+  // Give a process-group signal time to take effect before asserting the browser survived.
+  await delay(200);
+  assert.doesNotThrow(() => process.kill(browserPid(), 0), "the browser launched by Granted must survive cancellation");
+});
 test("credential subprocess handles missing executable, timeout, cancellation, and bounded output", async (t) => {
   const executable = join(temporary(t), "granted");
   await assert.rejects(fetchCredentials(executable, "dev"), /Cannot execute/);
