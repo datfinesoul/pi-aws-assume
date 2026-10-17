@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-17
+
+### Changed
+
+- Allow role access on Linux as well as macOS. The macOS-only guard is removed; Linux support is newer and less widely exercised. Interactive mode is still required, and status diagnostics remain visible wherever the extension loads.
+- Reject Windows explicitly with a clear reason instead of relying on Granted executable discovery to fail with an incidental "not installed" message.
+
+### Fixed
+
+- Stop the `/assume` progress screen from hanging after a successful IAM Identity Center browser login. Granted passes its stderr to the browser it launches, so the browser held the pipe the extension waited on and the `close` event was delayed until the browser closed. Discarding the subprocess stderr keeps only stdout piped, so completion no longer depends on the browser. Cancelling the stalled screen previously showed an error and the next attempt used the cached SSO token.
+- Never signal Granted's process group when cancelling or timing out. On Linux the login browser is a descendant in that group, so the previous group `SIGKILL` could close every browser window and tab. The extension now terminates Granted alone and escalates to `SIGKILL` for that process only if needed.
+
 ## [0.2.0] - 2026-10-17
 
 ### Added

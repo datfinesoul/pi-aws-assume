@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -482,6 +482,55 @@ test("credential subprocess uses argv, keeps both streams private, and validates
   await fetchCredentials(executable, "dev", { env: { ...process.env, AWS_PROFILE: "old", AWS_SECRET_ACCESS_KEY: "old", AWS_CONFIG_FILE: "/fake/custom-config", GRANTED_SSO_BROWSER_PROFILE: "fake-browser" } });
   writeFileSync(executable, `#!${process.execPath}\nconsole.log('FAKE_SECRET');console.error('FAKE_TOKEN');process.exit(9);\n`);
   await assert.rejects(fetchCredentials(executable, "dev"), (error) => error instanceof AssumeError && !/FAKE_SECRET|FAKE_TOKEN/.test(error.message));
+});
+test("credential subprocess is not blocked by a browser that inherits stderr", async (t) => {
+  const bin = temporary(t);
+  const executable = join(bin, "granted");
+  const pidFile = join(bin, "browser.pid");
+  // Granted launches the browser with its own stderr, so a browser that outlives Granted must
+  // not hold the pipe Pi waits on, or the /assume screen stays open after login completes.
+  writeFileSync(executable, `#!${process.execPath}
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const browser = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: ["ignore", "ignore", "inherit"], detached: true });
+browser.unref();
+writeFileSync(${JSON.stringify(pidFile)}, String(browser.pid));
+console.log(JSON.stringify(${JSON.stringify(wire())}));
+`, { mode: 0o755 });
+  t.after(() => {
+    try { const pid = Number(readFileSync(pidFile, "utf8")) || 0; if (pid > 0) process.kill(pid); } catch { /* Already exited. */ }
+  });
+  const value = await fetchCredentials(executable, "dev", { timeoutMs: 5000 });
+  assert.equal(value.accessKeyId, "FAKE_ACCESS");
+});
+test("cancelling the credential subprocess does not kill the browser it launched", async (t) => {
+  const bin = temporary(t);
+  const executable = join(bin, "granted");
+  const pidFile = join(bin, "browser.pid");
+  // On Linux the login browser is a descendant in Granted's process group, so cancelling or
+  // timing out must signal Granted alone or the browser and all of its windows and tabs are lost.
+  writeFileSync(executable, `#!${process.execPath}
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const browser = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "ignore", "ignore"] });
+writeFileSync(${JSON.stringify(pidFile)}, String(browser.pid));
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+  const browserPid = () => { try { return Number(readFileSync(pidFile, "utf8")) || 0; } catch { return 0; } };
+  // Never signal pid 0: that would target the test runner's own process group.
+  t.after(() => { const pid = browserPid(); if (pid > 0) try { process.kill(pid); } catch { /* Already exited. */ } });
+  // Cancel only after the fake browser exists, since Node startup can exceed a short fixed timeout.
+  const controller = new AbortController();
+  const pending = fetchCredentials(executable, "dev", { signal: controller.signal, timeoutMs: 30000 });
+  for (let waited = 0; !browserPid(); waited += 20) {
+    assert.ok(waited < 10000, "fake Granted did not launch its browser");
+    await delay(20);
+  }
+  controller.abort();
+  await assert.rejects(pending, /cancelled/);
+  // Give a process-group signal time to take effect before asserting the browser survived.
+  await delay(200);
+  assert.doesNotThrow(() => process.kill(browserPid(), 0), "the browser launched by Granted must survive cancellation");
 });
 test("credential subprocess handles missing executable, timeout, cancellation, and bounded output", async (t) => {
   const executable = join(temporary(t), "granted");

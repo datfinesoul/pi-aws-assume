@@ -181,8 +181,8 @@ export default function assumeExtension(pi: ExtensionAPI) {
     reason = NO_POLICY;
     if (!patterns.length) return;
 
-    reason = "Only macOS is supported in this alpha.";
-    if (process.platform !== "darwin") { ctx.ui.notify(unavailable(), "warning"); return; }
+    reason = "Only macOS and Linux are supported.";
+    if (process.platform === "win32") { ctx.ui.notify(unavailable(), "warning"); return; }
     const executable = findGranted();
     reason = "Granted is not installed or not on PATH; no installation or fallback was attempted.";
     if (!executable) { ctx.ui.notify(unavailable(), "warning"); return; }

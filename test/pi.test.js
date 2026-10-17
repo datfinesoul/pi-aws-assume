@@ -96,7 +96,7 @@ async function setup(t, { mode = "tui", dependency = true, trusted = true,
 // The installed loader may keep native JS modules cached even after clearExtensionCache().
 for (const helper of ["policy", "session"]) {
   test(`mixed-version reload reports a restart requirement for a cached ${helper} helper`, {
-    skip: !entry || (helper === "session" && process.platform !== "darwin"),
+    skip: !entry,
   }, async (t) => {
     const copy = mkdtempSync(join(tmpdir(), "pi-assume-reload-"));
     t.after(() => rmSync(copy, { recursive: true, force: true }));
@@ -151,7 +151,7 @@ test("Pi loads the extension without session-side effects", { skip: !entry }, as
   await assert.rejects(env.call("assume", "test-a"), /Only interactive terminal mode/);
 });
 
-test("missing Granted notifies and leaves shell/guards untouched", { skip: !entry || process.platform !== "darwin" }, async (t) => {
+test("missing Granted notifies and leaves shell/guards untouched", { skip: !entry }, async (t) => {
   const env = await setup(t, { dependency: false });
   assert.equal(env.tool("assume_profile").exposure, "model-only");
   assert.match((await env.metadata()).reason, /not installed/);
@@ -222,7 +222,7 @@ for (const [label, options] of [["missing", { writePolicy: false }], ["empty", {
 }
 
 test("global rules apply only by project-selected ID", {
-  skip: !entry || process.platform !== "darwin",
+  skip: !entry,
 }, async (t) => {
   const env = await setup(t, { writePolicy: false, globalPolicy: { profiles: [
     { id: "readonly", pattern: "test-a" }, { id: "other", pattern: "test-b" }] } });
@@ -253,7 +253,7 @@ test("global rules apply only by project-selected ID", {
 });
 
 test("project rules without global selections ignore global rules", {
-  skip: !entry || process.platform !== "darwin",
+  skip: !entry,
 }, async (t) => {
   const env = await setup(t, { profiles: ["test-a"], globalPolicy: { profiles: [{ id: "other", pattern: "test-b" }] } });
   assert.deepEqual((await env.metadata()).profiles, ["test-a"]);
@@ -262,7 +262,7 @@ test("project rules without global selections ignore global rules", {
 });
 
 test("rule-level auto-approval: selected global and project matches only; project rules that set it win, false vetoes", {
-  skip: !entry || process.platform !== "darwin",
+  skip: !entry,
 }, async (t) => {
   const env = await setup(t, {
     globalPolicy: { profiles: [
@@ -320,7 +320,7 @@ test("rule-level auto-approval: selected global and project matches only; projec
 });
 
 test("configured timeout also bounds lazy refresh and prevents the pending shell from running", {
-  skip: !entry || process.platform !== "darwin", timeout: 10000,
+  skip: !entry, timeout: 10000,
 }, async (t) => {
   const env = await setup(t, { projectPolicy: { timeoutSeconds: 2 } });
   // Return credentials already inside the five-minute refresh window, without advancing the real clock.
@@ -346,7 +346,7 @@ test("configured timeout also bounds lazy refresh and prevents the pending shell
   assert.equal((await env.metadata()).activeProfile, "test-a");
 });
 
-test("reminder is injected only when the active profile changes", { skip: !entry || process.platform !== "darwin" }, async (t) => {
+test("reminder is injected only when the active profile changes", { skip: !entry }, async (t) => {
   const env = await setup(t);
   const reminder = async () => (await env.emit("before_agent_start"))[0]?.message?.content;
   assert.match(await reminder(), /active \/assume profile is none/);
@@ -359,7 +359,7 @@ test("reminder is injected only when the active profile changes", { skip: !entry
 });
 
 test("interactive Pi integration: approval, private credentials, shell environment, and all session reset reasons", {
-  skip: !entry || process.platform !== "darwin",
+  skip: !entry,
 }, async (t) => {
   const env = await setup(t);
   assert.equal(env.count(), 0);
@@ -405,7 +405,7 @@ test("interactive Pi integration: approval, private credentials, shell environme
 });
 
 test("path glob integration lists/picks concrete matches and forwards only approved names", {
-  skip: !entry || process.platform !== "darwin",
+  skip: !entry,
 }, async (t) => {
   const env = await setup(t, { profiles: ["glg/*/readonly", "glg/**/audit"], configuredProfiles: [
     "glg/a/readonly", "glg/b/readonly", "glg/org/team/readonly", "glg/org/team/audit", "other/a/readonly",
@@ -438,7 +438,7 @@ test("path glob integration lists/picks concrete matches and forwards only appro
 });
 
 test("large wildcard match lists are paginated without exposing nonmatching names", {
-  skip: !entry || process.platform !== "darwin",
+  skip: !entry,
 }, async (t) => {
   const names = Array.from({ length: 205 }, (_, n) => `glg/team-${String(n).padStart(3, "0")}/readonly`);
   const env = await setup(t, { profiles: ["glg/*/readonly"], configuredProfiles: [...names, "other/private/admin"] });
@@ -456,7 +456,7 @@ test("large wildcard match lists are paginated without exposing nonmatching name
 });
 
 test("no matching glob profiles gives an empty picker result without auth or wildcard execution", {
-  skip: !entry || process.platform !== "darwin",
+  skip: !entry,
 }, async (t) => {
   const env = await setup(t, { profiles: ["glg/**"], configuredProfiles: ["other/private/admin"] });
   env.ctx.ui.select = async () => { throw new Error("An empty picker must not open"); };
@@ -468,7 +468,7 @@ test("no matching glob profiles gives an empty picker result without auth or wil
 });
 
 test("declining assistant approval never invokes Granted, but user selection counts", {
-  skip: !entry || process.platform !== "darwin",
+  skip: !entry,
 }, async (t) => {
   const env = await setup(t);
   env.deny();
@@ -482,7 +482,7 @@ test("declining assistant approval never invokes Granted, but user selection cou
 });
 
 test("clear between environment preparation and spawn cannot launch stale credentials", {
-  skip: !entry || process.platform !== "darwin",
+  skip: !entry,
 }, async (t) => {
   const env = await setup(t);
   await env.call("assume", "test-a");
@@ -493,7 +493,7 @@ test("clear between environment preparation and spawn cannot launch stale creden
 });
 
 test("late user selector result cannot authenticate after session replacement", {
-  skip: !entry || process.platform !== "darwin",
+  skip: !entry,
 }, async (t) => {
   const env = await setup(t);
   let choose;
@@ -510,7 +510,7 @@ test("late user selector result cannot authenticate after session replacement", 
 });
 
 test("authentication loader cancels command/tool work and preserves the previous role", {
-  skip: !entry || process.platform !== "darwin", timeout: 10000,
+  skip: !entry, timeout: 10000,
 }, async (t) => {
   const env = await setup(t);
   await env.call("assume", "test-a");
@@ -546,7 +546,7 @@ for (const [label, options, timeoutSeconds] of [
   ["project override", { globalPolicy: { timeoutSeconds: 120 }, projectPolicy: { timeoutSeconds: 3 } }, 3],
 ]) {
  test(`command authentication closes its loader at the ${label} timeout`, {
-  skip: !entry || process.platform !== "darwin", timeout: 10000,
+  skip: !entry, timeout: 10000,
  }, async (t) => {
   const env = await setup(t, options);
   writeFileSync(join(env.cwd, "bin/granted"), `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
@@ -607,7 +607,7 @@ for (const [label, options, timeoutSeconds] of [
 }
 
 test("AWS row right-aligns local-time expiry and stays within narrow terminal widths", {
-  skip: !entry || process.platform !== "darwin",
+  skip: !entry,
 }, async (t) => {
   const env = await setup(t);
   const { visibleWidth } = await import(new URL("../../pi-tui/dist/index.js", pathToFileURL(resolve(entry))));
@@ -644,7 +644,7 @@ test("AWS row right-aligns local-time expiry and stays within narrow terminal wi
 });
 
 test("invalid policy fails closed, reports the error without content, and stays inactive", {
-  skip: !entry || process.platform !== "darwin",
+  skip: !entry,
 }, async (t) => {
   const env = await setup(t);
   writeFileSync(join(env.cwd, ".pi/aws-assume.json"), '{"profiles":["*"],"other":"FAKE_SECRET"}');

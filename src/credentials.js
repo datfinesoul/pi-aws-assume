@@ -83,22 +83,27 @@ export function fetchCredentials(executable, profile, { signal, env = process.en
   return new Promise((resolvePromise, reject) => {
     if (signal?.aborted) { reject(new AssumeError("Role operation cancelled.")); return; }
     const child = spawn(executable, ["credential-process", "--profile", profile, "--window", "5m", "--auto-login"], {
-      env: grantedEnvironment(env), stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32",
+      // stderr is discarded: Granted launches the browser with its own stderr, so piping it here
+      // lets an open browser hold the pipe and delay the 'close' event long after Granted exits.
+      // detached keeps Granted and the browser it launches out of Pi's process group, so terminal
+      // signals aimed at Pi do not reach them. Only this pid is ever signalled, never the group.
+      env: grantedEnvironment(env), stdio: ["ignore", "pipe", "ignore"], detached: process.platform !== "win32",
     });
     let output = "";
     let bytes = 0;
     let failure;
     let settled = false;
+    let escalation;
     const kill = (message) => {
       if (settled) return;
       failure = new AssumeError(message);
-      try {
-        if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
-        else child.kill("SIGKILL");
-      } catch { /* Process may already have exited. */ }
-      // Detached descendants must not hold inherited pipes open after cancellation/timeout.
+      // Signal Granted only, never its process group: on Linux the login browser is a descendant
+      // in that group, so a group signal would close every browser window and tab. The stdout pipe
+      // is destroyed below, so an orphaned descendant cannot keep completion pending.
+      try { child.kill("SIGTERM"); } catch { /* Process may already have exited. */ }
+      escalation = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* Already exited. */ } }, 2000);
+      escalation.unref?.();
       child.stdout.destroy();
-      child.stderr.destroy();
       finish(failure);
     };
     const abort = () => kill("Role operation cancelled.");
@@ -117,9 +122,9 @@ export function fetchCredentials(executable, profile, { signal, env = process.en
       if (bytes > 65536) kill("Granted credential output exceeded the safety limit (output withheld).");
       else output += chunk;
     });
-    child.stderr.resume(); // Drain, but never forward Granted diagnostics into Pi's transcript.
     child.once("error", () => finish(new AssumeError("Cannot execute Granted. Check that it is still installed and executable.")));
     child.once("close", (code) => {
+      clearTimeout(escalation);
       if (failure) { finish(failure); return; }
       if (code !== 0) { finish(new AssumeError(`Granted failed (exit ${code ?? "signal"}); raw output withheld. Check Granted setup outside Pi.`)); return; }
       try { finish(undefined, parseCredentials(output)); } catch (error) { finish(error); }
