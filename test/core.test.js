@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -482,6 +482,24 @@ test("credential subprocess uses argv, keeps both streams private, and validates
   await fetchCredentials(executable, "dev", { env: { ...process.env, AWS_PROFILE: "old", AWS_SECRET_ACCESS_KEY: "old", AWS_CONFIG_FILE: "/fake/custom-config", GRANTED_SSO_BROWSER_PROFILE: "fake-browser" } });
   writeFileSync(executable, `#!${process.execPath}\nconsole.log('FAKE_SECRET');console.error('FAKE_TOKEN');process.exit(9);\n`);
   await assert.rejects(fetchCredentials(executable, "dev"), (error) => error instanceof AssumeError && !/FAKE_SECRET|FAKE_TOKEN/.test(error.message));
+});
+test("credential subprocess is not blocked by a browser that inherits stderr", async (t) => {
+  const bin = temporary(t);
+  const executable = join(bin, "granted");
+  const pidFile = join(bin, "browser.pid");
+  // Granted launches the browser with its own stderr, so a browser that outlives Granted must
+  // not hold the pipe Pi waits on, or the /assume screen stays open after login completes.
+  writeFileSync(executable, `#!${process.execPath}
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const browser = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: ["ignore", "ignore", "inherit"], detached: true });
+browser.unref();
+writeFileSync(${JSON.stringify(pidFile)}, String(browser.pid));
+console.log(JSON.stringify(${JSON.stringify(wire())}));
+`, { mode: 0o755 });
+  t.after(() => { try { process.kill(Number(readFileSync(pidFile, "utf8"))); } catch { /* already gone */ } });
+  const value = await fetchCredentials(executable, "dev", { timeoutMs: 5000 });
+  assert.equal(value.accessKeyId, "FAKE_ACCESS");
 });
 test("credential subprocess handles missing executable, timeout, cancellation, and bounded output", async (t) => {
   const executable = join(temporary(t), "granted");

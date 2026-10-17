@@ -83,7 +83,9 @@ export function fetchCredentials(executable, profile, { signal, env = process.en
   return new Promise((resolvePromise, reject) => {
     if (signal?.aborted) { reject(new AssumeError("Role operation cancelled.")); return; }
     const child = spawn(executable, ["credential-process", "--profile", profile, "--window", "5m", "--auto-login"], {
-      env: grantedEnvironment(env), stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32",
+      // stderr is discarded: Granted launches the browser with its own stderr, so piping it here
+      // lets an open browser hold the pipe and delay the 'close' event long after Granted exits.
+      env: grantedEnvironment(env), stdio: ["ignore", "pipe", "ignore"], detached: process.platform !== "win32",
     });
     let output = "";
     let bytes = 0;
@@ -98,7 +100,6 @@ export function fetchCredentials(executable, profile, { signal, env = process.en
       } catch { /* Process may already have exited. */ }
       // Detached descendants must not hold inherited pipes open after cancellation/timeout.
       child.stdout.destroy();
-      child.stderr.destroy();
       finish(failure);
     };
     const abort = () => kill("Role operation cancelled.");
@@ -117,7 +118,6 @@ export function fetchCredentials(executable, profile, { signal, env = process.en
       if (bytes > 65536) kill("Granted credential output exceeded the safety limit (output withheld).");
       else output += chunk;
     });
-    child.stderr.resume(); // Drain, but never forward Granted diagnostics into Pi's transcript.
     child.once("error", () => finish(new AssumeError("Cannot execute Granted. Check that it is still installed and executable.")));
     child.once("close", (code) => {
       if (failure) { finish(failure); return; }

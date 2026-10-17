@@ -16,7 +16,7 @@ Requirements:
 
 - **[Granted CLI](https://github.com/fwdcloudsec/granted)** installed and on Pi's `PATH`, with your IAM Identity Center profiles already configured. Follow [Granted's setup guide](https://docs.granted.dev/getting-started) first; this extension does not install it or replace its authentication.
 - **Interactive Pi 1.x, version 1.2.0 or newer.** See [Pi version compatibility](#pi-version-compatibility).
-- **macOS.** Role access in this alpha does not support Linux or JSON, print, and RPC modes. Status diagnostics remain available wherever the extension loads.
+- **macOS or Linux.** Role access requires interactive mode; JSON, print, and RPC modes are unsupported. Status diagnostics remain available wherever the extension loads. Live Granted login is verified on macOS; Linux support is present but not yet verified.
 
 In a project with a policy, startup checks for Granted without invoking it. If missing, the extension notifies once and role access stays unavailable; status diagnostics remain.
 
@@ -242,7 +242,7 @@ Unknown fields, other value types, and invalid rules fail the whole policy close
 - **Awareness without authorization.** Status diagnostics and a model-facing context reminder remain available when role access is disabled. If a task requires an assumed profile but setup or authentication is unavailable, the assistant must stop and report the blocker, not fall back to ambient credentials, search credential stores, invoke AWS/Granted directly to obtain credentials, or edit AWS policy/profile files. The user handles setup outside Pi and runs `/reload`. Unrelated tasks may still use plain `bash` with its ambient environment. This guidance is not technical enforcement.
 - **Region order in `aws_bash`.** An inherited `AWS_REGION`, then an inherited `AWS_DEFAULT_REGION`, then the selected profile's `region` in your AWS config file, then `us-east-1`. A CLI `--region` or explicit SDK region still wins. An inherited region therefore applies to every selected profile.
 - **Memory-only state.** The extension never persists credentials or approvals and never automatically reactivates a role. Granted's own cache is separate.
-- **macOS, Granted, interactive mode.** Other platforms, credential tools, and non-interactive modes are out of scope for this alpha.
+- **macOS/Linux, Granted, interactive mode.** Other platforms, credential tools, and non-interactive modes are out of scope for this alpha.
 - **Not a sandbox.** See [Known limitations](#known-limitations).
 
 ### Pi version compatibility
@@ -316,7 +316,7 @@ For an installed-Pi loader/command/tool smoke test, point `PI_CODING_AGENT_ENTRY
 PI_CODING_AGENT_ENTRY=/path/to/pi-coding-agent/dist/index.js npm test
 ```
 
-Without this variable, installed-Pi tests are skipped. Interactive integration tests target Pi 1.2.0 on macOS and do not yet run in CI; run them locally before a release. Authentication tests use fake Granted executables and credentials in temporary directories—no model requests, real AWS credentials, or role assumptions. Live Granted authentication remains a user-run smoke test; the prototype was developed with Granted 0.38.0.
+Without this variable, installed-Pi tests are skipped. Interactive integration tests target Pi 1.2.0 and run on macOS and Linux, and do not yet run in CI; run them locally before a release. Authentication tests use fake Granted executables and credentials in temporary directories—no model requests, real AWS credentials, or role assumptions. Live Granted authentication remains a user-run smoke test; the prototype was developed with Granted 0.38.0.
 
 Every pull request that triggers CI must bump `version` in `package.json` and move the `Unreleased` changelog entries under a matching `## [<version>] - <date>` heading; CI fails otherwise. Pull requests that change only Markdown skipped by CI are exempt. After the merge to `main` passes CI, the Release workflow tags that commit `v<version>`. Merges that do not change the version are not tagged.
 
