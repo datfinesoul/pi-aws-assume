@@ -288,9 +288,9 @@ export default function assumeExtension(pi: ExtensionAPI) {
     updateStatus(ctx);
     // Auto-approval is policy-granted access; always surface it so an unexpected policy edit is visible.
     if (autoApproveRules.length) {
-      const shown = autoApproveRules.slice(0, 10).map((rule) => `${rule.id} (${rule.pattern}, ${rule.source})`);
-      const more = autoApproveRules.length > shown.length ? `, and ${autoApproveRules.length - shown.length} more` : "";
-      ctx.ui.notify(`assume: the assistant can select profiles matching these rules without confirmation (autoApprove): ${shown.join(", ")}${more}, unless a matching project rule sets autoApprove: false. If you did not configure this, review the policy files outside Pi.`, "warning");
+      const shown = autoApproveRules.slice(0, 10).map((rule) => `• ${rule.pattern} (${rule.source})`);
+      const more = autoApproveRules.length > shown.length ? `\n• and ${autoApproveRules.length - shown.length} more` : "";
+      ctx.ui.notify(`AWS auto-approval enabled for:\n${shown.join("\n")}${more}`, "warning");
     }
     if (!current.status().profiles.length) ctx.ui.notify("assume: no existing AWS profile names match the configured patterns. /reload refreshes discovery; explicit concrete names must still match the rules.", "info");
   });

@@ -281,8 +281,8 @@ test("rule-level auto-approval: selected global and project matches only; projec
   env.deny();
   assert.equal(env.count(), 0);
   assert.equal((await env.metadata()).activeProfile, null);
-  const loadNotice = env.notices.find((text) => /without confirmation \(autoApprove\)/.test(text));
-  assert.match(loadNotice, /readonly \(example\/\*\/readonly, global\), exact \(test-a, project\), unless a matching project rule sets autoApprove: false\./);
+  const loadNotice = env.notices.find((text) => text.startsWith("AWS auto-approval enabled for:"));
+  assert.equal(loadNotice, "AWS auto-approval enabled for:\n• example/*/readonly (global)\n• test-a (project)");
   assert.doesNotMatch(loadNotice, /unselected|manual/);
   await env.call("assume", "example/a/readonly");
   await env.call("assume", "example/new/readonly");

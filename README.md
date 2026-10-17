@@ -204,7 +204,7 @@ Add `autoApprove: true` to an individual project rule or a global rule explicitl
 
 The assistant can select matching readonly profiles without a confirmation dialog; admin profiles still need first-use approval per concrete name.
 
-When rules overlap, **the project decides first**:
+When rules overlap, **the project decides first**. Rule order does not matter:
 
 1. Matching project rules that set `autoApprove` decide. If any of them sets `false`, confirmation is required; otherwise the profile is auto-approved.
 2. Only if no matching project rule sets `autoApprove` do the selected global rules decide, the same way.
