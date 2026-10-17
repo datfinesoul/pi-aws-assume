@@ -18,6 +18,7 @@ import { checkPiVersion, isUsableVersion } from "../../src/version.js";
 const AWS_BASH = "aws_bash";
 // Reasons are plain sentences shared by user notices and model-facing output.
 const NO_POLICY = "This project has no AWS profile policy (.pi/aws-assume.json), or it defines no rules and selects no global rule IDs. Create the policy outside Pi, then /reload. See pi-aws-assume's README.md.";
+const STALE_HELPERS = "AWS Assume's JavaScript helpers are from an older version. Fully exit and restart Pi to finish loading the extension update; /reload cannot refresh these cached helpers. No role access was enabled.";
 // Model-facing only; never shown in user notices.
 const SAFETY_GUIDANCE = "assume_profile is a Pi extension tool, not a shell command, function, or alias. Never probe for it with bash/type/which or search shell startup files. If its tool declaration is unavailable, report that the Pi tool is unavailable; ask the user to check extension loading and /reload, not to define a shell alias. If the task requires an assumed profile and role access or authentication is unavailable, stop and report the blocker. Do not fall back to ambient credentials, search credential stores, invoke AWS/Granted directly to obtain credentials, or modify project/global AWS policy or AWS profile files. The user manages setup outside Pi, then /reload. Plain bash otherwise keeps the ambient AWS environment. This is guidance, not a sandbox.";
 // Namespace access: an older Pi without this export must not fail at import time.
@@ -39,6 +40,8 @@ function statusSummary(current: RoleSession) {
 export default function assumeExtension(pi: ExtensionAPI) {
   let session: RoleSession | undefined;
   let guards: ReturnType<typeof createGuards> | undefined;
+  // Always-on, independent of role access: built-in write/edit tools cannot change policy files.
+  let policyGuard: ReturnType<typeof createGuards> | undefined;
   let reason = "The session has not started.";
   let announced: string | undefined;
   let hasAssumed = false;
@@ -77,7 +80,7 @@ export default function assumeExtension(pi: ExtensionAPI) {
   function roleTool() {
     return {
       name: "assume_profile", label: "AWS profile", exposure: "model-only" as const,
-      description: "Select one of this project's allowed AWS profiles for aws_bash. Use only when the user or task clearly requires an assumed /assume profile; when unclear, do not use it and use plain bash with the ambient AWS environment. Actions: list concrete allowed profile names (100 per page; use nextOffset), status, assume a concrete profile name, cancel pending authentication, or clear the active profile. Approval is once per concrete profile per session, never per wildcard rule. Credential-fetch output is not exposed. This is a Pi tool, not a shell command or alias. Always available for status diagnostics even when role access is disabled; status reports the setup blocker. If an assumed profile is required but unavailable, stop and report it; do not hunt for credentials or bypass this tool.",
+      description: "Select one of this project's allowed AWS profiles for aws_bash. Use only when the user or task clearly requires an assumed /assume profile; when unclear, do not use it and use plain bash with the ambient AWS environment. Actions: list concrete allowed profile names (100 per page; use nextOffset), status, assume a concrete profile name, cancel pending authentication, or clear the active profile. Unless a matching policy rule has autoApprove enabled, approval is once per concrete profile per session, never per wildcard rule. Credential-fetch output is not exposed. This is a Pi tool, not a shell command or alias. Always available for status diagnostics even when role access is disabled; status reports the setup blocker. If an assumed profile is required but unavailable, stop and report it; do not hunt for credentials or bypass this tool.",
       parameters: Type.Object({
         action: StringEnum(["list", "status", "assume", "cancel", "clear"] as const),
         profile: Type.Optional(Type.String({ description: "Concrete profile name matching the project allowlist; required for assume. Never pass a wildcard here." })),
@@ -97,6 +100,8 @@ export default function assumeExtension(pi: ExtensionAPI) {
               signal,
               confirm: (profile: string, approvalSignal: AbortSignal) => ctx.ui.confirm("Allow AWS profile for this session?",
                 `Allow the assistant to use ${profile}? Switching back will not prompt again until the session resets.`, { signal: approvalSignal }),
+              onAutoApprove: (profile: string) => ctx.ui.notify(
+                `assume: ${profile} was approved for the assistant by an autoApprove policy rule; no confirmation was shown.`, "warning"),
             });
           } else if (params.action === "cancel") current.cancel();
           else if (params.action === "clear") current.clear();
@@ -134,6 +139,13 @@ export default function assumeExtension(pi: ExtensionAPI) {
     deactivate();
     updateStatus(ctx);
 
+    // Guard policy files before any availability check: a policy written while role access is off
+    // (missing, invalid, unsupported) would otherwise take effect at the user's next /reload.
+    const policyPath = join(ctx.cwd, ".pi", "aws-assume.json");
+    const globalPolicyPath = join(piAgent.getAgentDir(), "aws-assume.json");
+    policyGuard = createGuards({ cwd: ctx.cwd, home: homedir(), policyPath,
+      additionalPolicyPaths: [globalPolicyPath], policyOnly: true });
+
     reason = "Only interactive terminal mode is supported.";
     if (ctx.mode !== "tui") return;
     const version = checkPiVersion(piVersion);
@@ -142,21 +154,30 @@ export default function assumeExtension(pi: ExtensionAPI) {
     if (!ctx.isProjectTrusted()) return;
 
     // No effective rules means no role access, discovery, or guards; diagnostics remain visible.
-    const policyPath = join(ctx.cwd, ".pi", "aws-assume.json");
-    let patterns: readonly string[] = [];
-    const globalPolicyPath = join(piAgent.getAgentDir(), "aws-assume.json");
+    let policy: ReturnType<typeof loadPolicy>;
     try {
-      patterns = loadPolicy({
+      policy = loadPolicy({
         bundledPath: fileURLToPath(new URL("./config.json", import.meta.url)),
         globalPath: globalPolicyPath,
         projectPath: policyPath,
       });
+      // Pi can reload this TypeScript entry while retaining native JavaScript imports.
+      // Never reinterpret the old pattern-array API or silently drop new policy settings.
+      if (!policy || !Array.isArray(policy.profiles) || !Number.isInteger(policy.timeoutSeconds) ||
+          policy.profiles.some((rule: { source?: unknown }) => rule.source !== "project" && rule.source !== "global")) {
+        throw new AssumeError(STALE_HELPERS);
+      }
     }
     catch (error) {
       reason = error instanceof Error ? error.message : "Cannot load the policy; no profiles are allowed.";
       ctx.ui.notify(unavailable(), "error");
       return;
     }
+    const patterns = [...new Set(policy.profiles.map((rule: { pattern: string }) => rule.pattern))];
+    type Rule = { id: string; pattern: string; autoApprove: boolean | null; source: "project" | "global" };
+    const rules = policy.profiles as readonly Rule[];
+    const autoApproveRules = rules.filter((rule) => rule.autoApprove === true);
+    const timeoutMs = policy.timeoutSeconds * 1000;
     reason = NO_POLICY;
     if (!patterns.length) return;
 
@@ -173,10 +194,11 @@ export default function assumeExtension(pi: ExtensionAPI) {
       try { availableProfiles = discoverProfileNames({ cwd: ctx.cwd }); }
       catch { ctx.ui.notify("assume: cannot list AWS profile names safely. Check AWS files outside Pi. Explicit concrete names still require a matching policy rule.", "warning"); }
     }
-    const current = new RoleSession({ profiles: patterns, availableProfiles,
+    const current = new RoleSession({ profiles: patterns,
+      autoApproveRules: rules.filter((rule) => rule.autoApprove !== null), availableProfiles,
       region: (profile: string) => discoverProfileRegion(profile, { cwd: ctx.cwd }), fetch: async (profile: string, options: { signal: AbortSignal }) => {
       const outcome = await ctx.ui.custom<{ credentials?: Awaited<ReturnType<typeof fetchCredentials>>; error?: unknown }>((tui, theme, _kb, done) => {
-        const deadline = Date.now() + 60000;
+        const deadline = Date.now() + timeoutMs;
         const loader = new BorderedLoader(tui, theme,
           `AWS: resolving ${profile}. Complete browser/keychain sign-in (Esc to cancel).`);
         const countdown = new Text("", 1, 0);
@@ -211,7 +233,7 @@ export default function assumeExtension(pi: ExtensionAPI) {
         loader.onAbort = () => controller.abort();
         if (signal.aborted) onAbort();
         if (!finished) {
-          void fetchCredentials(executable, profile, { signal, timeoutMs: 60000 })
+          void fetchCredentials(executable, profile, { signal, timeoutMs })
             .then((credentials) => finish({ credentials }), (error) => finish({ error }));
         }
         return loader;
@@ -220,6 +242,12 @@ export default function assumeExtension(pi: ExtensionAPI) {
       if (!outcome.credentials) throw new AssumeError("Role operation cancelled.");
       return outcome.credentials;
     } });
+    // A fresh policy helper can still coexist with an older cached session implementation.
+    if (!Array.isArray(current.status().autoApproveRules)) {
+      reason = STALE_HELPERS;
+      ctx.ui.notify(unavailable(), "warning");
+      return;
+    }
     const currentGuards = createGuards({ cwd: ctx.cwd, home: homedir(), policyPath,
       additionalPolicyPaths: [globalPolicyPath] });
     const local = createLocalBashOperations({ shellPath: settings.shellPath });
@@ -258,19 +286,26 @@ export default function assumeExtension(pi: ExtensionAPI) {
     });
     pi.registerTool(roleTool());
     updateStatus(ctx);
+    // Auto-approval is policy-granted access; always surface it so an unexpected policy edit is visible.
+    if (autoApproveRules.length) {
+      const shown = autoApproveRules.slice(0, 10).map((rule) => `• ${rule.pattern} (${rule.source})`);
+      const more = autoApproveRules.length > shown.length ? `\n• and ${autoApproveRules.length - shown.length} more` : "";
+      ctx.ui.notify(`AWS auto-approval enabled for:\n${shown.join("\n")}${more}`, "warning");
+    }
     if (!current.status().profiles.length) ctx.ui.notify("assume: no existing AWS profile names match the configured patterns. /reload refreshes discovery; explicit concrete names must still match the rules.", "info");
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
-    session?.clear({ approvals: true }); session = undefined; guards = undefined; announced = undefined;
+    session?.clear({ approvals: true }); session = undefined; guards = undefined; policyGuard = undefined; announced = undefined;
     hasAssumed = false;
     updateStatus(ctx);
   });
 
   pi.on("tool_call", (event, ctx) => {
-    if (!session || !guards || ctx.mode !== "tui" || !ctx.isProjectTrusted()) return;
     const path = (event.input as { path?: string } | undefined)?.path;
-    const blocked = guards.file(event.toolName, path);
+    // Full guards (policy + credential stores) only with active role access; policy files are always guarded.
+    const active = session && guards && ctx.mode === "tui" && ctx.isProjectTrusted() ? guards : policyGuard;
+    const blocked = active?.file(event.toolName, path);
     if (blocked) return { block: true, reason: blocked };
   });
 

@@ -1,6 +1,6 @@
 {
   "name": "@datfinesoul/pi-aws-assume",
-  "version": "0.1.0-beta.2",
+  "version": "0.2.0",
   "description": "A Pi extension that selects project-allowed AWS IAM Identity Center profiles through Granted.",
   "type": "module",
   "license": "MIT",

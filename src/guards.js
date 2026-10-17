@@ -18,9 +18,10 @@ function canonical(path) {
   }
 }
 
-export function createGuards({ cwd, home, policyPath, additionalPolicyPaths = [], env = process.env }) {
+// policyOnly protects just the policy files from built-in writes/edits; credential stores are left alone.
+export function createGuards({ cwd, home, policyPath, additionalPolicyPaths = [], env = process.env, policyOnly = false }) {
   const expand = (path) => resolve(cwd, path === "~" ? home : path.startsWith("~/") ? join(home, path.slice(2)) : path);
-  const stores = [join(home, ".aws"), join(home, ".granted"),
+  const stores = policyOnly ? [] : [join(home, ".aws"), join(home, ".granted"),
     env.AWS_CONFIG_FILE, env.AWS_SHARED_CREDENTIALS_FILE].filter(Boolean).map(expand);
   const policies = [policyPath, ...additionalPolicyPaths].filter(Boolean).map(expand);
   const readOnly = [...policies, ...stores];
