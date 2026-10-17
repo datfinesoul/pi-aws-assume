@@ -82,7 +82,7 @@ For assistant-driven use, `assume_profile` selects the profile and `aws_bash` ru
 - `assume_profile` accepts an `action`: `list`, `status`, `assume`, `cancel`, or `clear`. `assume` requires a concrete `profile`, never a wildcard. `list` accepts an optional integer `offset` and returns up to 100 names, `totalProfiles`, and `nextOffset`. The picker and completions show all discovered matches.
 - `aws_bash` takes the same input as `bash` and uses Pi's configured shell and command prefix. Without an active profile, it refuses to run rather than falling back to ambient credentials.
 
-Unless a matching rule sets `autoApprove: true`, approval is per concrete profile, not per wildcard: approving `example/team-a/readonly` does not approve `example/team-b/readonly`. Your own `/assume` selection counts as approval; switching back in the same session does not prompt again. A declined or failed switch preserves the previous active profile. Accepted approvals remain even if authentication fails.
+Unless matching rules auto-approve it (see [precedence](#automatically-approve-matching-profiles)), approval is per concrete profile, not per wildcard: approving `example/team-a/readonly` does not approve `example/team-b/readonly`. Your own `/assume` selection counts as approval; switching back in the same session does not prompt again. A declined or failed switch preserves the previous active profile. Accepted approvals remain even if authentication fails.
 
 **No automatic role activation.** Credentials and approvals are memory-only and reset on restart, `/reload`, `/new`, resume, fork, or shutdown. Neither session history nor Granted's cache restores them; you must select a profile again.
 
@@ -98,9 +98,9 @@ Successive `aws_bash` calls and their CLI/SDK subprocesses inherit the selected 
 | Global | `~/.pi/agent/aws-assume.json` | Personal timeout default and library of named rules; follows `PI_CODING_AGENT_DIR`. Rules apply only by selected ID. |
 | Project | `<project>/.pi/aws-assume.json` | Read from the working directory only after Pi grants project trust. Overrides the timeout, defines the project's own rules, and selects global rule IDs. |
 
-All files define `profiles` as rules with required `id` and `pattern` fields and optional `autoApprove` (default `false`). A project's own rules always apply; global rules, including their auto-approval setting, apply only when the project lists their IDs in `global`. Bundled rules share the selectable library; a global rule with the same ID replaces the entire bundled rule.
+All files define `profiles` as rules with required `id` and `pattern` fields and optional `autoApprove`. Omitting `autoApprove` means no opinion; with no matching `true` rule, the profile needs confirmation. A project's own rules always apply; global rules, including their auto-approval setting, apply only when the project lists their IDs in `global`. Bundled rules share the selectable library; a global rule with the same ID replaces the entire bundled rule.
 
-The optional `timeoutSeconds` setting merges independently of rule selection: project → global → bundled → 60 seconds. In a project with rules or selected IDs, the global file is read for settings even when no global rules are selected; this never imports unselected rules.
+The optional `timeoutSeconds` setting merges independently of rule selection: project → global → bundled → 60 seconds. In a project with rules or selected IDs, the global file is read for settings even when no global rules are selected; this never imports unselected rules. Because the global file is then always read, an invalid or unreadable global `aws-assume.json` disables role access in every such project, not only those selecting global rules. This is deliberate: fix the global file outside Pi, then `/reload`.
 
 **Unlike the automatic configuration merging used by [other datfinesoul Pi extensions](https://github.com/datfinesoul?tab=repositories&q=topic%3Api-extension&type=&language=&sort=), this allowlist requires explicit project selection.** New global rule IDs never widen an existing project's access. The global file cannot opt projects in.
 
@@ -166,7 +166,7 @@ Then select the rules a trusted project uses in its `.pi/aws-assume.json`, optio
 }
 ```
 
-This project allows profiles matching `example/**/readonly` and `example/team/admin`, but imports neither `audit` nor future global rule IDs. Selection makes profiles eligible, not assumed. Approval is still required unless a matching selected or project rule sets `autoApprove: true`.
+This project allows profiles matching `example/**/readonly` and `example/team/admin`, but imports neither `audit` nor future global rule IDs. Selection makes profiles eligible, not assumed. Approval is still required unless matching rules auto-approve it, as described in [precedence](#automatically-approve-matching-profiles).
 
 ### Customize the authentication timeout
 
@@ -202,7 +202,17 @@ Add `autoApprove: true` to an individual project rule or a global rule explicitl
 }
 ```
 
-The assistant can select matching readonly profiles without a confirmation dialog; admin profiles still need first-use approval per concrete name. Omitted `autoApprove` defaults to `false`. If rules overlap, **any matching rule with `autoApprove: true` skips confirmation**; a matching `false` rule is not a veto. The same matching rules apply to explicitly supplied names that discovery has not listed. Unselected global rules never grant access or automatic approval.
+The assistant can select matching readonly profiles without a confirmation dialog; admin profiles still need first-use approval per concrete name.
+
+When rules overlap, **the project decides first**:
+
+1. Matching project rules that set `autoApprove` decide. If any of them sets `false`, confirmation is required; otherwise the profile is auto-approved.
+2. Only if no matching project rule sets `autoApprove` do the selected global rules decide, the same way.
+3. Otherwise, confirmation is required.
+
+Omitting `autoApprove` means no opinion, so a broad project allow rule such as `example/**` does not cancel a selected global auto-approval. To require confirmation where a global rule would auto-approve, add a project rule with `autoApprove: false`. Explicit `false` can only add a confirmation, never remove one. The same rules apply to explicitly supplied names that discovery has not listed. Unselected global rules never grant access or automatic approval.
+
+Auto-approval is never silent. At session start, a warning lists every effective `autoApprove: true` rule by ID, pattern, and layer; each time the assistant's selection is approved by such a rule, a notice names the profile. If you see these without having configured them, review the policy files outside Pi before continuing.
 
 Auto-approval skips only the extension's profile confirmation, not authentication, keychain, or browser interaction. It never activates a role at startup or after a reset; the assistant must still explicitly select a concrete allowed profile. Run `/reload` after editing configuration yourself outside the assistant.
 
@@ -218,7 +228,7 @@ Edit or remove entries yourself outside the assistant, then `/reload` to apply c
 | `profiles` | Array of rule objects, optional | At most 100 rules with unique IDs per file. The project's own and selected rules total at most 100. |
 | `profiles[].id` | String, required | Stable ID, at most 128 characters, using concrete profile-name syntax. |
 | `profiles[].pattern` | String, required | Exact profile name or path-style glob, at most 128 characters. |
-| `profiles[].autoApprove` | Boolean, optional | Defaults to `false`. Skip confirmation for concrete profiles matching this rule. Applies only to project rules and explicitly selected global/bundled rules. |
+| `profiles[].autoApprove` | Boolean, optional | Omitted means no opinion. `true` skips confirmation for matching concrete profiles; `false` requires it. Project rules that set it take precedence over selected global/bundled rules, and `false` wins within a layer. |
 | `timeoutSeconds` | Integer, optional | Authentication/refresh timeout in seconds, from 1 to 2147483 (Node's timer limit). Project overrides global, then bundled; default `60`. |
 
 Unknown fields, other value types, and invalid rules fail the whole policy closed. Regexes, bracket classes, braces, negation, escaping, empty slash segments, and embedded globstars such as `dev**` are not supported. Concrete profile names start with an ASCII letter or digit, contain only ASCII letters, digits, `_`, `.`, `@`, `/`, `+`, `:`, `=`, or `-`, and have no empty slash-delimited segments.
@@ -273,10 +283,10 @@ Failed refresh prevents the pending shell command from executing with stale cred
 
 ### Known limitations
 
-- **Plain `bash` is unrestricted by design.** It can use your ambient AWS credentials and any profile, run Granted, read AWS files, or edit `.pi/aws-assume.json`. Policy edits only take effect after your `/reload`. New profiles need approval unless a matching rule enables auto-approval; review policy changes you did not make.
+- **Plain `bash` is unrestricted by design.** It can use your ambient AWS credentials and any profile, run Granted, read AWS files, or edit `.pi/aws-assume.json`. Policy edits only take effect after your `/reload`. New profiles need approval unless a matching rule enables auto-approval, so a policy edit with `autoApprove: true` can remove the confirmation step entirely; the auto-approval warnings make this visible, not impossible. Review policy changes you did not make.
 - The extension denies non-allowlisted names before asking approval or invoking Granted. In `aws_bash`, explicit `--profile` and `AWS_PROFILE`/`AWS_DEFAULT_PROFILE` assignments are rejected in common shell forms, even for allowed names: select through `assume_profile` and omit profile flags.
 - In `aws_bash`, common `assume`/`assumego`/`granted` command invocations, `aws configure`, `aws sso login`/`logout`, literal references to credential/policy paths (absolute, `~/`, `$HOME/`, or `${HOME}/` spellings), and any mention of the `aws-assume.json` policy file name are rejected. Plain `bash` is never checked.
-- In projects with an active policy, built-in file reads under `~/.aws`/`~/.granted` and configured AWS file paths are blocked, and built-in writes/edits to these stores or the project/global `aws-assume.json` policies are blocked, including symlink aliases.
+- Built-in writes/edits to the project and global `aws-assume.json` policies are always blocked while the extension is loaded, even when role access is unavailable (no policy, an invalid policy, missing Granted, or an unsupported mode or platform), including symlink aliases. This keeps the assistant from creating a policy that would take effect at your next `/reload`. In projects with an active policy, built-in file reads under `~/.aws`/`~/.granted` and configured AWS file paths, and built-in writes/edits to them, are also blocked. Plain `bash` is never guarded.
 - These checks are **not a shell parser, permission sandbox, or complete data-loss-prevention system**. Variables, encoded commands, aliases, indirect SDK calls, alternate credential locations, custom tools, file scanning from an ancestor directory, OS keychain access, or modifying extension code can bypass them. Host AWS default files and metadata endpoints are not made inaccessible merely by stripping environment variables. Do not promise that arbitrary assistant-run programs cannot access broader host credentials.
 - Credentials supplied to an `aws_bash` program are accessible to that program. It can print or exfiltrate them; generic shell output is not secretly filtered. Keeping credential-fetch output private does not guarantee that credentials can never appear in a transcript.
 - Profile names are allowlisted, not pinned AWS account/role identities. User-side changes to AWS configuration or Granted caches can affect what a name resolves to. No AWS identity verification call is made.

@@ -108,7 +108,7 @@ for (const helper of ["policy", "session"]) {
     const current = readFileSync(path, "utf8");
     const previous = helper === "policy"
       ? current.replace("export function loadPolicy(", "function loadCurrentPolicy(") + "\nexport function loadPolicy() { return []; }\n"
-      : current.replace("autoApprovePatterns: [...this.#autoApprovePatterns], ", "");
+      : current.replace("autoApproveRules: this.#autoApproveRules.map((rule) => ({ ...rule })), ", "");
     assert.notEqual(previous, current);
     writeFileSync(path, previous);
     const warm = join(copy, "warm.ts");
@@ -121,7 +121,7 @@ for (const helper of ["policy", "session"]) {
     assert.deepEqual(warmed.errors, []);
     const oldValue = await warmed.extensions[0].commands.get("warm").handler();
     if (helper === "policy") assert.deepEqual(oldValue, []);
-    else assert.equal(oldValue.autoApprovePatterns, undefined);
+    else assert.equal(oldValue.autoApproveRules, undefined);
     // Update the helper on disk and perform the same factory-cache reset as /reload.
     writeFileSync(path, current);
     loader.clearExtensionCache();
@@ -189,7 +189,17 @@ for (const [label, options] of [["missing", { writePolicy: false }], ["empty", {
     assert.deepEqual(env.notices, []);
     assert.equal(env.widgets.has("assume"), false);
     assert.deepEqual(await env.emit("tool_call", { toolName: "read", input: { path: "~/.aws/credentials" } }), [undefined]);
-    assert.deepEqual(await env.emit("tool_call", { toolName: "write", input: { path: ".pi/aws-assume.json" } }), [undefined]);
+    // Policy files are always guarded from built-in writes/edits; credential stores only with active role access.
+    for (const toolName of ["write", "edit"]) {
+      for (const path of [".pi/aws-assume.json", join(env.cwd, "agent/aws-assume.json")]) {
+        const [blocked] = await env.emit("tool_call", { toolName, input: { path } });
+        assert.equal(blocked?.block, true, `${toolName} ${path}`);
+        assert.match(blocked.reason, /protected from assistant edits/);
+      }
+    }
+    assert.deepEqual(await env.emit("tool_call", { toolName: "read", input: { path: ".pi/aws-assume.json" } }), [undefined]);
+    assert.deepEqual(await env.emit("tool_call", { toolName: "write", input: { path: "~/.aws/config" } }), [undefined]);
+    assert.deepEqual(await env.emit("tool_call", { toolName: "bash", input: { command: "echo {} > .pi/aws-assume.json" } }), [undefined]);
     const reminder = (await env.emit("before_agent_start"))[0].message.content;
     assert.match(reminder, /role access is unavailable/);
     assert.match(reminder, /search credential stores/);
@@ -251,7 +261,7 @@ test("project rules without global selections ignore global rules", {
   assert.equal(env.count(), 0);
 });
 
-test("rule-level auto-approval applies to selected global and project matches only, including overlaps and new names", {
+test("rule-level auto-approval: selected global and project matches only; project rules that set it win, false vetoes", {
   skip: !entry || process.platform !== "darwin",
 }, async (t) => {
   const env = await setup(t, {
@@ -260,38 +270,53 @@ test("rule-level auto-approval applies to selected global and project matches on
       { id: "unselected", pattern: "**", autoApprove: true },
     ] },
     projectPolicy: { global: ["readonly"], profiles: [
-      { id: "manual", pattern: "example/**", autoApprove: false },
+      // Omitted autoApprove has no opinion, so this broad allow rule does not cancel the global auto-approval.
+      { id: "manual", pattern: "example/**" },
+      // An explicit project false overrides the selected global true for its matches.
+      { id: "locked", pattern: "example/locked/readonly", autoApprove: false },
       { id: "exact", pattern: "test-a", autoApprove: true },
     ] },
-    configuredProfiles: ["example/a/readonly", "example/a/admin", "test-a", "outside"],
+    configuredProfiles: ["example/a/readonly", "example/a/admin", "example/locked/readonly", "test-a", "outside"],
   });
   env.deny();
   assert.equal(env.count(), 0);
   assert.equal((await env.metadata()).activeProfile, null);
+  const loadNotice = env.notices.find((text) => /without confirmation \(autoApprove\)/.test(text));
+  assert.match(loadNotice, /readonly \(example\/\*\/readonly, global\), exact \(test-a, project\), unless a matching project rule sets autoApprove: false\./);
+  assert.doesNotMatch(loadNotice, /unselected|manual/);
   await env.call("assume", "example/a/readonly");
   await env.call("assume", "example/new/readonly");
   await env.call("assume", "test-a");
   assert.equal(env.prompts(), 0);
   assert.equal(env.count(), 3);
-  assert.deepEqual((await env.metadata()).autoApprovePatterns, ["example/*/readonly", "test-a"]);
+  assert.deepEqual(env.notices.filter((text) => /by an autoApprove policy rule/.test(text)).map((text) => text.split(" ")[1]),
+    ["example/a/readonly", "example/new/readonly", "test-a"]);
+  assert.deepEqual((await env.metadata()).autoApproveRules, [
+    { pattern: "example/*/readonly", autoApprove: true, source: "global" },
+    { pattern: "example/locked/readonly", autoApprove: false, source: "project" },
+    { pattern: "test-a", autoApprove: true, source: "project" },
+  ]);
   await assert.rejects(env.call("assume", "example/a/admin"), /declined/);
   await assert.rejects(env.call("assume", "example/org/team/readonly"), /declined/);
+  await assert.rejects(env.call("assume", "example/locked/readonly"), /declined/);
   await assert.rejects(env.call("assume", "outside"), /allowlist/);
   await assert.rejects(env.call("assume", "example/*/readonly"), /allowlist/);
   assert.equal(env.count(), 3);
-  assert.equal(env.prompts(), 2);
+  assert.equal(env.prompts(), 3);
   await env.emit("session_start", { reason: "reload" });
   assert.equal((await env.metadata()).activeProfile, null);
   assert.deepEqual((await env.metadata()).approvedProfiles, []);
   assert.equal(env.count(), 3);
   await env.call("assume", "example/new/readonly");
-  assert.equal(env.prompts(), 2);
+  assert.equal(env.prompts(), 3);
   // Removing autoApprove takes effect at reload, including discarding earlier approvals.
   writeFileSync(join(env.cwd, ".pi/aws-assume.json"), JSON.stringify({ profiles: [{ id: "exact", pattern: "test-a" }] }));
+  env.notices.length = 0;
   await env.emit("session_start", { reason: "reload" });
+  assert.ok(!env.notices.some((text) => /autoApprove/.test(text)), "no auto-approval notice without autoApprove rules");
   await assert.rejects(env.call("assume", "test-a"), /declined/);
   assert.equal(env.count(), 4);
-  assert.equal(env.prompts(), 3);
+  assert.equal(env.prompts(), 4);
 });
 
 test("configured timeout also bounds lazy refresh and prevents the pending shell from running", {

@@ -99,7 +99,8 @@ export function parsePolicyFile(text, source = "project") {
       throw failure(source, 'has an invalid or duplicate rule; each rule requires "id" and "pattern", with optional boolean "autoApprove"');
     }
     ids.add(rule.id);
-    return Object.freeze({ id: rule.id, pattern: rule.pattern, autoApprove: rule.autoApprove ?? false });
+    // Omitted autoApprove is "no opinion" (null): only explicit true/false take part in precedence.
+    return Object.freeze({ id: rule.id, pattern: rule.pattern, autoApprove: rule.autoApprove ?? null });
   });
   return Object.freeze({ global: Object.freeze([...global]), profiles: Object.freeze(rules), timeoutSeconds: value.timeoutSeconds });
 }
@@ -138,7 +139,9 @@ export function loadPolicy({ bundledPath, globalPath, projectPath }) {
       selected.push(rule);
     }
   }
-  const rules = [...selected, ...project.profiles];
+  // Tag each rule with its layer; auto-approval precedence is project first, then selected global rules.
+  const rules = [...selected.map((rule) => Object.freeze({ ...rule, source: "global" })),
+    ...project.profiles.map((rule) => Object.freeze({ ...rule, source: "project" }))];
   if (rules.length > 100) throw failure("project", "selects more than 100 rules in total");
   return Object.freeze({ profiles: Object.freeze(rules),
     timeoutSeconds: project.timeoutSeconds ?? global?.timeoutSeconds ?? bundled?.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS });

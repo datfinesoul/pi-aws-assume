@@ -128,11 +128,12 @@ test("approvals remain per concrete slash-delimited profile, never per matching 
   await session.assume("glg/new/readonly", { confirm });
   assert.equal(prompted.at(-1), "glg/new/readonly");
 });
+const auto = (...patterns) => patterns.map((pattern) => ({ pattern, autoApprove: true, source: "project" }));
 test("auto-approval skips prompts only for matching allowed concrete profiles, including undiscovered names", async () => {
   const fetched = [];
   const prompted = [];
   const session = new RoleSession({ profiles: ["example/**/readonly", "example/*/admin", "exact"],
-    autoApprovePatterns: ["example/*/readonly", "exact", "outside/**"],
+    autoApproveRules: auto("example/*/readonly", "exact", "outside/**"),
     fetch: async (profile) => { fetched.push(profile); return credentials(); }, now: () => now });
   const confirm = async (profile) => { prompted.push(profile); return false; };
   assert.equal(session.status().activeProfile, null);
@@ -157,17 +158,56 @@ test("auto-approval skips prompts only for matching allowed concrete profiles, i
   await session.assume("example/new/readonly", { confirm });
   assert.equal(prompted.length, 2, "configured auto-approval remains after reset without automatic activation");
 });
-test("any matching auto-approve rule suffices when patterns overlap", async () => {
-  const session = new RoleSession({ profiles: ["example/**", "example/*/readonly"],
-    autoApprovePatterns: ["example/*/readonly"], fetch: async () => credentials(), now: () => now });
-  await session.assume("example/team/readonly");
-  await assert.rejects(session.assume("example/team/admin"), /declined/);
-  assert.equal(session.status().activeProfile, "example/team/readonly");
+test("policy auto-approvals are reported; prompted, user, and repeat approvals are not", async () => {
+  const reported = [];
+  const session = new RoleSession({ profiles: ["a", "b", "c"], autoApproveRules: auto("a", "c"),
+    fetch: async () => credentials(), now: () => now });
+  const onAutoApprove = (profile) => reported.push(profile);
+  await session.assume("a", { onAutoApprove });
+  await session.assume("a", { onAutoApprove });
+  await session.assume("b", { confirm: async () => true, onAutoApprove });
+  await session.assume("c", { userInitiated: true, onAutoApprove });
+  assert.deepEqual(reported, ["a"]);
+  const throwing = new RoleSession({ profiles: ["a"], autoApproveRules: auto("a"), fetch: async () => credentials(), now: () => now });
+  await throwing.assume("a", { onAutoApprove: () => { throw new Error("notice failed"); } });
+  assert.equal(throwing.status().activeProfile, "a", "a failing notice does not change role state");
+});
+test("project rules that set autoApprove decide, false wins; selected global rules apply only otherwise", async () => {
+  const rule = (pattern, autoApprove, source) => ({ pattern, autoApprove, source });
+  const session = new RoleSession({ profiles: ["example/**"], fetch: async () => credentials(), now: () => now,
+    autoApproveRules: [
+      rule("example/*/readonly", true, "global"),
+      rule("example/**", true, "global"),
+      rule("example/prod/*", false, "project"),
+      rule("example/dev/*", true, "project"),
+      rule("example/dev/admin", false, "project"),
+      rule("example/team/*", null, "project"),
+      rule("example/*/other", true, "unknown"),
+    ] });
+  const decisions = {};
+  for (const profile of ["example/team/readonly", "example/prod/readonly", "example/dev/readonly", "example/dev/admin",
+    "example/x/other", "example/x/y/z"]) {
+    let prompted = false;
+    try { await session.assume(profile, { confirm: async () => { prompted = true; return false; } }); } catch { /* declined */ }
+    decisions[profile] = prompted ? "confirm" : "auto";
+  }
+  assert.deepEqual(decisions, {
+    "example/team/readonly": "auto", // omitted project autoApprove has no opinion; global true applies
+    "example/prod/readonly": "confirm", // project false overrides global true
+    "example/dev/readonly": "auto", // project true
+    "example/dev/admin": "confirm", // false wins among matching project rules
+    "example/x/other": "auto", // unknown sources are ignored; global example/** applies
+    "example/x/y/z": "auto",
+  });
+  assert.deepEqual(session.status().autoApproveRules.map((r) => r.source), ["global", "global", "project", "project", "project"]);
+  const confirmOnly = new RoleSession({ profiles: ["a"], autoApproveRules: [rule("a", false, "global")],
+    fetch: async () => credentials(), now: () => now });
+  await assert.rejects(confirmOnly.assume("a"), /declined/, "no auto-approval without a true rule");
 });
 test("auto-approved failed switches preserve the active role; reset cancels pending auto-approved work", async () => {
   const gate = deferred();
   let pending = false;
-  const session = new RoleSession({ profiles: ["a", "b"], autoApprovePatterns: ["*"], now: () => now,
+  const session = new RoleSession({ profiles: ["a", "b"], autoApproveRules: auto("*"), now: () => now,
     fetch: async (profile) => {
       if (pending) return gate.promise;
       if (profile === "b") throw new AssumeError("fetch failed");

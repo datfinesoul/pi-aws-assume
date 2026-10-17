@@ -11,12 +11,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Optional `timeoutSeconds` for Granted authentication and lazy refresh: project overrides global, with a 60-second default. Both the progress screen and credential subprocess use the configured deadline. Settings alone never enable role access.
-- Optional per-rule `autoApprove`, defaulting to `false`, to skip first-use confirmation for matching concrete profiles. Only project rules and explicitly selected global rules participate; any matching `true` rule suffices when patterns overlap. Roles still require explicit selection and never activate automatically.
+- Optional per-rule `autoApprove` to skip first-use confirmation for matching concrete profiles. Omitted means no opinion. Only project rules and explicitly selected global rules participate: matching project rules that set it decide, with `false` winning among them; selected global rules decide only when no matching project rule sets it; otherwise confirmation is required. Roles still require explicit selection and never activate automatically.
+- Warn at session start when the effective policy contains `autoApprove` rules, listing their IDs, patterns, and layers, and notify each time a profile is approved by such a rule, so a policy change you did not make cannot grant silent access.
 
 ### Changed
 
-- Read the global configuration for timeout defaults whenever the project defines or selects rules, even without selected global rule IDs. Unselected global rules still grant no access or auto-approval; invalid participating global configuration fails closed.
-- Include `autoApprovePatterns` in active-session status metadata so configured automatic approval is visible independently of remembered per-profile approvals.
+- Read the global configuration for timeout defaults whenever the project defines or selects rules, even without selected global rule IDs. Unselected global rules still grant no access or auto-approval; invalid or unreadable global configuration therefore fails role access closed in every project that defines or selects rules.
+- Block built-in writes/edits to the project and global `aws-assume.json` whenever the extension is loaded, not only with active role access, so the assistant cannot create a policy that takes effect at the next `/reload`. Credential-store guards keep their active-policy scope; plain `bash` is unchanged.
+- Include `autoApproveRules` (pattern, setting, and layer) in active-session status metadata so configured automatic approval is visible independently of remembered per-profile approvals.
 
 ### Fixed
 

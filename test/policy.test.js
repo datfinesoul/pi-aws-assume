@@ -22,7 +22,8 @@ test("project rules never import unselected global rules, but inherit the global
   put("projectPath", { profiles: [{ id: "admin", pattern: "example/team/admin" }] });
   assert.deepEqual(patterns(paths), ["example/team/admin"]);
   assert.equal(loadPolicy(paths).timeoutSeconds, 120);
-  assert.equal(loadPolicy(paths).profiles[0].autoApprove, false);
+  assert.equal(loadPolicy(paths).profiles[0].autoApprove, null, "omitted autoApprove has no opinion");
+  assert.equal(loadPolicy(paths).profiles[0].source, "project");
 });
 
 test("missing, empty, or settings-only project stays inert even with global rules and auto-approval", (t) => {
@@ -47,6 +48,7 @@ test("projects receive only the global rule IDs they select, never later global 
   put("globalPath", { profiles: [...library.profiles, { id: "everything", pattern: "**", autoApprove: true }] });
   assert.deepEqual(patterns(paths), ["example/**/readonly", "example/team/admin"]);
   assert.ok(loadPolicy(paths).profiles.every((rule) => !rule.autoApprove));
+  assert.deepEqual(loadPolicy(paths).profiles.map((rule) => rule.source), ["global", "project"]);
   put("projectPath", { global: ["audit"] });
   assert.deepEqual(patterns(paths), ["example/**/audit"]);
 });
@@ -59,7 +61,7 @@ test("bundled rules are selectable and replaced as a whole by a global rule with
   assert.equal(loadPolicy(paths).profiles[0].autoApprove, true);
   put("globalPath", library);
   assert.deepEqual(patterns(paths), ["example/**/readonly", "bundled/base"]);
-  assert.equal(loadPolicy(paths).profiles[0].autoApprove, false, "omission does not retain a lower layer's auto-approval");
+  assert.equal(loadPolicy(paths).profiles[0].autoApprove, null, "omission does not retain a lower layer's auto-approval");
 });
 
 test("duplicate patterns retain their rule-specific approval settings", (t) => {
@@ -67,7 +69,7 @@ test("duplicate patterns retain their rule-specific approval settings", (t) => {
   put("globalPath", library);
   put("projectPath", { global: ["readonly"], profiles: [{ id: "mine", pattern: "example/**/readonly", autoApprove: true }] });
   assert.deepEqual(patterns(paths), ["example/**/readonly"]);
-  assert.deepEqual(loadPolicy(paths).profiles.map((rule) => rule.autoApprove), [false, true]);
+  assert.deepEqual(loadPolicy(paths).profiles.map((rule) => [rule.autoApprove, rule.source]), [[null, "global"], [true, "project"]]);
 });
 
 test("unknown, conflicting, or excessive global selections fail closed and name the project file", (t) => {
@@ -115,7 +117,7 @@ test("only project files may select global rules; rules require id/pattern and o
       assert.equal(rule.autoApprove, autoApprove);
       assert.ok(Object.isFrozen(rule));
     }
-    assert.equal(parsePolicyFile('{"profiles":[{"id":"x","pattern":"x"}]}', source).profiles[0].autoApprove, false);
+    assert.equal(parsePolicyFile('{"profiles":[{"id":"x","pattern":"x"}]}', source).profiles[0].autoApprove, null);
     for (const autoApprove of [null, "true", "false", 1, 0, [], {}]) {
       assert.throws(() => parsePolicyFile(JSON.stringify({ profiles: [{ id: "x", pattern: "x", autoApprove }] }), source), /invalid/);
     }
