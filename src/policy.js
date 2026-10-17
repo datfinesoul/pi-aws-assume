@@ -69,14 +69,22 @@ const LABELS = Object.freeze({
 const failure = (source, problem) => new Error(`${LABELS[source]} ${problem}; no profiles are allowed.`);
 const isObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-// One schema for every layer: rules are exactly { id, pattern }. Only the project may select global rule IDs.
+export const DEFAULT_TIMEOUT_SECONDS = 60;
+// Node timers use signed 32-bit milliseconds; reject values that would overflow into an immediate timeout.
+export const MAX_TIMEOUT_SECONDS = Math.floor(2147483647 / 1000);
+
+// One schema for every layer. Only the project may select global rule IDs.
 export function parsePolicyFile(text, source = "project") {
   if (!LABELS[source]) throw new TypeError("Unknown policy source.");
   let value;
   try { value = JSON.parse(text); } catch { throw failure(source, "must contain valid JSON"); }
-  const keys = source === "project" ? ["global", "profiles"] : ["profiles"];
+  const keys = source === "project" ? ["global", "profiles", "timeoutSeconds"] : ["profiles", "timeoutSeconds"];
   if (!isObject(value) || Object.keys(value).some((key) => !keys.includes(key))) {
     throw failure(source, `may contain only ${keys.map((key) => `"${key}"`).join(" and ")}`);
+  }
+  if (Object.hasOwn(value, "timeoutSeconds") && (!Number.isInteger(value.timeoutSeconds) ||
+      value.timeoutSeconds < 1 || value.timeoutSeconds > MAX_TIMEOUT_SECONDS)) {
+    throw failure(source, `has an invalid "timeoutSeconds"; use an integer from 1 to ${MAX_TIMEOUT_SECONDS}`);
   }
   const profiles = value.profiles ?? [];
   const global = value.global ?? [];
@@ -85,14 +93,15 @@ export function parsePolicyFile(text, source = "project") {
       new Set(global).size !== global.length) throw failure(source, 'has an invalid or duplicate "global" rule ID');
   const ids = new Set();
   const rules = profiles.map((rule) => {
-    if (!isObject(rule) || Object.keys(rule).sort().join() !== "id,pattern" ||
-        !isProfileName(rule.id) || !isPattern(rule.pattern) || ids.has(rule.id)) {
-      throw failure(source, 'has an invalid or duplicate rule; each rule must be { "id", "pattern" }');
+    if (!isObject(rule) || Object.keys(rule).some((key) => !["id", "pattern", "autoApprove"].includes(key)) ||
+        !isProfileName(rule.id) || !isPattern(rule.pattern) || ids.has(rule.id) ||
+        (Object.hasOwn(rule, "autoApprove") && typeof rule.autoApprove !== "boolean")) {
+      throw failure(source, 'has an invalid or duplicate rule; each rule requires "id" and "pattern", with optional boolean "autoApprove"');
     }
     ids.add(rule.id);
-    return Object.freeze({ id: rule.id, pattern: rule.pattern });
+    return Object.freeze({ id: rule.id, pattern: rule.pattern, autoApprove: rule.autoApprove ?? false });
   });
-  return Object.freeze({ global: Object.freeze([...global]), profiles: Object.freeze(rules) });
+  return Object.freeze({ global: Object.freeze([...global]), profiles: Object.freeze(rules), timeoutSeconds: value.timeoutSeconds });
 }
 
 function readPolicyFile(path, source) {
@@ -105,16 +114,20 @@ function readPolicyFile(path, source) {
   return parsePolicyFile(text, source);
 }
 
-// Returns the effective profile patterns. Global rules apply only when the project selects their IDs,
-// so rules added to the global file later never reach an existing project.
+// Settings merge normally; access rules still require explicit project selection.
+// No project rules/selections means no access, even if timeoutSeconds is configured.
 export function loadPolicy({ bundledPath, globalPath, projectPath }) {
   const project = readPolicyFile(projectPath, "project");
-  if (!project) return Object.freeze([]);
+  if (!project || (!project.global.length && !project.profiles.length)) {
+    return Object.freeze({ profiles: Object.freeze([]), timeoutSeconds: project?.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS });
+  }
+  const bundled = readPolicyFile(bundledPath, "bundled");
+  const global = readPolicyFile(globalPath, "global");
   const selected = [];
   if (project.global.length) {
-    // Bundled rules are the lowest layer of the selectable library; a global rule with the same ID replaces it.
+    // Bundled rules are the lowest layer of the selectable library; a global rule replaces the whole rule.
     const library = new Map();
-    for (const layer of [readPolicyFile(bundledPath, "bundled"), readPolicyFile(globalPath, "global")]) {
+    for (const layer of [bundled, global]) {
       for (const rule of layer?.profiles ?? []) library.set(rule.id, rule);
     }
     const own = new Set(project.profiles.map((rule) => rule.id));
@@ -127,5 +140,6 @@ export function loadPolicy({ bundledPath, globalPath, projectPath }) {
   }
   const rules = [...selected, ...project.profiles];
   if (rules.length > 100) throw failure("project", "selects more than 100 rules in total");
-  return Object.freeze([...new Set(rules.map((rule) => rule.pattern))]);
+  return Object.freeze({ profiles: Object.freeze(rules),
+    timeoutSeconds: project.timeoutSeconds ?? global?.timeoutSeconds ?? bundled?.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS });
 }

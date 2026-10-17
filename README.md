@@ -2,7 +2,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A [Pi](https://github.com/earendil-works/pi) extension that uses [Granted](https://github.com/fwdcloudsec/granted) to run assistant commands with temporary AWS IAM Identity Center credentials. Each project allowlists existing profiles; the assistant asks for approval once per concrete profile per session.
+A [Pi](https://github.com/earendil-works/pi) extension that uses [Granted](https://github.com/fwdcloudsec/granted) to run assistant commands with temporary AWS IAM Identity Center credentials. Each project allowlists existing profiles; by default, the assistant asks for approval once per concrete profile per session. Individual rules can opt into automatic approval.
 
 > [!IMPORTANT]
 > - **Opt-in per project.** `.pi/aws-assume.json` must define rules or select global rule IDs before role access, `aws_bash`, and guards become available. `assume_profile` remains visible for setup diagnostics without granting access.
@@ -36,7 +36,7 @@ pi install --local git:github.com/datfinesoul/pi-aws-assume
 
 Pi records the package in `.pi/settings.json`.
 
-Project packages load only after project trust. Run `/reload` or start a new session after installation.
+Project packages load only after project trust. Run `/reload` or start a new session after installation. After an extension code update, fully restart Pi if AWS Assume reports cached helpers from an older version; `/reload` can retain imported JavaScript helpers.
 
 Installation scope and [configuration](#configuration) are independent: either installation reads the trusted working project's policy and any global rules it selects. A global installation or rule library alone never enables role access.
 
@@ -82,7 +82,7 @@ For assistant-driven use, `assume_profile` selects the profile and `aws_bash` ru
 - `assume_profile` accepts an `action`: `list`, `status`, `assume`, `cancel`, or `clear`. `assume` requires a concrete `profile`, never a wildcard. `list` accepts an optional integer `offset` and returns up to 100 names, `totalProfiles`, and `nextOffset`. The picker and completions show all discovered matches.
 - `aws_bash` takes the same input as `bash` and uses Pi's configured shell and command prefix. Without an active profile, it refuses to run rather than falling back to ambient credentials.
 
-Approval is per concrete profile, not per wildcard: approving `example/team-a/readonly` does not approve `example/team-b/readonly`. Your own `/assume` selection counts as approval; switching back in the same session does not prompt again. A declined or failed switch preserves the previous active profile. Accepted approvals remain even if authentication fails.
+Unless a matching rule sets `autoApprove: true`, approval is per concrete profile, not per wildcard: approving `example/team-a/readonly` does not approve `example/team-b/readonly`. Your own `/assume` selection counts as approval; switching back in the same session does not prompt again. A declined or failed switch preserves the previous active profile. Accepted approvals remain even if authentication fails.
 
 **No automatic role activation.** Credentials and approvals are memory-only and reset on restart, `/reload`, `/new`, resume, fork, or shutdown. Neither session history nor Granted's cache restores them; you must select a profile again.
 
@@ -94,15 +94,17 @@ Successive `aws_bash` calls and their CLI/SDK subprocesses inherit the selected 
 
 | Layer | Location | Behavior |
 |---|---|---|
-| Bundled | `extensions/aws-assume/config.json` | Empty; no shipped allowlist. |
-| Global | `~/.pi/agent/aws-assume.json` | Personal library of named rules; follows `PI_CODING_AGENT_DIR`. Applies to a project only by selected ID. |
-| Project | `<project>/.pi/aws-assume.json` | Read from the working directory only after Pi grants project trust. Defines the project's own rules and selects global rule IDs. |
+| Bundled | `extensions/aws-assume/config.json` | No shipped allowlist; authentication timeout defaults to 60 seconds. |
+| Global | `~/.pi/agent/aws-assume.json` | Personal timeout default and library of named rules; follows `PI_CODING_AGENT_DIR`. Rules apply only by selected ID. |
+| Project | `<project>/.pi/aws-assume.json` | Read from the working directory only after Pi grants project trust. Overrides the timeout, defines the project's own rules, and selects global rule IDs. |
 
-All files define `profiles` as `{ "id", "pattern" }` rules. A project's own rules always apply; global rules apply only when the project lists their IDs in `global`. Without selected IDs, the global file is not read. Bundled rules share the selectable library; a global rule with the same ID replaces a bundled one.
+All files define `profiles` as rules with required `id` and `pattern` fields and optional `autoApprove` (default `false`). A project's own rules always apply; global rules, including their auto-approval setting, apply only when the project lists their IDs in `global`. Bundled rules share the selectable library; a global rule with the same ID replaces the entire bundled rule.
+
+The optional `timeoutSeconds` setting merges independently of rule selection: project → global → bundled → 60 seconds. In a project with rules or selected IDs, the global file is read for settings even when no global rules are selected; this never imports unselected rules.
 
 **Unlike the automatic configuration merging used by [other datfinesoul Pi extensions](https://github.com/datfinesoul?tab=repositories&q=topic%3Api-extension&type=&language=&sort=), this allowlist requires explicit project selection.** New global rule IDs never widen an existing project's access. The global file cannot opt projects in.
 
-A missing or empty project policy disables role access, regardless of global rules, but does not hide status diagnostics or model-facing safety guidance. Policy loads at session start or `/reload`, not when files change. Invalid or unreadable participating files fail the whole policy closed, with a notice identifying the file's layer but not its contents. Undefined global IDs and conflicts between selected and project rule IDs are invalid.
+A missing project policy, or one containing only settings and no rules or selected IDs, disables role access regardless of global rules, but does not hide status diagnostics or model-facing safety guidance. Policy loads at session start or `/reload`, not when files change. Invalid or unreadable participating files fail the whole policy closed, with a notice identifying the file's layer but not its contents. Undefined global IDs and conflicts between selected and project rule IDs are invalid.
 
 The extension never writes policies, AWS profiles, or global Pi settings. Granted has its own side effects; see [Credentials and refresh](#credentials-and-refresh).
 
@@ -164,7 +166,45 @@ Then select the rules a trusted project uses in its `.pi/aws-assume.json`, optio
 }
 ```
 
-This project allows profiles matching `example/**/readonly` and `example/team/admin`, but imports neither `audit` nor future global rule IDs. Selection makes profiles eligible, not approved or assumed.
+This project allows profiles matching `example/**/readonly` and `example/team/admin`, but imports neither `audit` nor future global rule IDs. Selection makes profiles eligible, not assumed. Approval is still required unless a matching selected or project rule sets `autoApprove: true`.
+
+### Customize the authentication timeout
+
+Set an optional global default in `~/.pi/agent/aws-assume.json` (or under `PI_CODING_AGENT_DIR`), alongside any global rules:
+
+```json
+{
+  "timeoutSeconds": 120
+}
+```
+
+A project's `.pi/aws-assume.json` can override it, independently of global rule selection:
+
+```json
+{
+  "timeoutSeconds": 180,
+  "profiles": [{ "id": "readonly", "pattern": "example/**/readonly" }]
+}
+```
+
+Omitting the project setting inherits the global value; omitting both uses 60 seconds. The timeout covers each Granted credential fetch, including browser authentication and lazy refresh, and drives both the progress-screen countdown and subprocess deadline. It does not change `aws_bash` command timeouts. Settings alone never enable role access.
+
+### Automatically approve matching profiles
+
+Add `autoApprove: true` to an individual project rule or a global rule explicitly selected by the project:
+
+```json
+{
+  "profiles": [
+    { "id": "readonly", "pattern": "example/*/readonly", "autoApprove": true },
+    { "id": "admin", "pattern": "example/*/admin" }
+  ]
+}
+```
+
+The assistant can select matching readonly profiles without a confirmation dialog; admin profiles still need first-use approval per concrete name. Omitted `autoApprove` defaults to `false`. If rules overlap, **any matching rule with `autoApprove: true` skips confirmation**; a matching `false` rule is not a veto. The same matching rules apply to explicitly supplied names that discovery has not listed. Unselected global rules never grant access or automatic approval.
+
+Auto-approval skips only the extension's profile confirmation, not authentication, keychain, or browser interaction. It never activates a role at startup or after a reset; the assistant must still explicitly select a concrete allowed profile. Run `/reload` after editing configuration yourself outside the assistant.
 
 ### Change or remove access
 
@@ -178,6 +218,8 @@ Edit or remove entries yourself outside the assistant, then `/reload` to apply c
 | `profiles` | Array of rule objects, optional | At most 100 rules with unique IDs per file. The project's own and selected rules total at most 100. |
 | `profiles[].id` | String, required | Stable ID, at most 128 characters, using concrete profile-name syntax. |
 | `profiles[].pattern` | String, required | Exact profile name or path-style glob, at most 128 characters. |
+| `profiles[].autoApprove` | Boolean, optional | Defaults to `false`. Skip confirmation for concrete profiles matching this rule. Applies only to project rules and explicitly selected global/bundled rules. |
+| `timeoutSeconds` | Integer, optional | Authentication/refresh timeout in seconds, from 1 to 2147483 (Node's timer limit). Project overrides global, then bundled; default `60`. |
 
 Unknown fields, other value types, and invalid rules fail the whole policy closed. Regexes, bracket classes, braces, negation, escaping, empty slash segments, and embedded globstars such as `dev**` are not supported. Concrete profile names start with an ASCII letter or digit, contain only ASCII letters, digits, `_`, `.`, `@`, `/`, `+`, `:`, `=`, or `-`, and have no empty slash-delimited segments.
 
@@ -213,7 +255,7 @@ The extension registers `/assume`, model-only AWS tools, session hooks, the stat
 
 For glob rules, discovery reads profile section names from `~/.aws/config` and `~/.aws/credentials` (or `AWS_CONFIG_FILE`/`AWS_SHARED_CREDENTIALS_FILE`) at session start/reload. It excludes SSO-session/service sections, retains valid names, and sorts and deduplicates matches for the picker, completions, and list tool. Limits are 2 MiB per file and 10,000 distinct names. Discovery never returns or logs credential values, runs credential processes, or invokes AWS or Granted.
 
-Exact-name rules remain listed even if discovery misses them; Granted validates them on selection. Discovery failures warn and omit wildcard expansion. The listing is a snapshot: an explicitly supplied concrete name is eligible if it matches a rule, even when not listed. New matches still require approval. `/reload` refreshes discovery and resets credentials and approvals. Wildcard strings can never be selected or passed to Granted.
+Exact-name rules remain listed even if discovery misses them; Granted validates them on selection. Discovery failures warn and omit wildcard expansion. The listing is a snapshot: an explicitly supplied concrete name is eligible if it matches a rule, even when not listed. New matches still require approval unless a matching rule enables auto-approval. `/reload` refreshes discovery and resets credentials and approvals. Wildcard strings can never be selected or passed to Granted.
 
 ### Credentials and refresh
 
@@ -221,7 +263,7 @@ The extension invokes `granted credential-process --profile <name> --window 5m -
 
 Credential output is privately captured and validated, with a 64 KiB stdout limit. Raw stdout/stderr never reaches tool results, notifications, errors, or session entries. Errors are deliberately generic; diagnose Granted outside Pi.
 
-When SSO is needed, Granted opens the browser after approval/selection. A progress screen shows a spinner and countdown during selection or refresh. Press Escape (or your dialog-cancel key) to abort without clearing the previous role. Authentication times out after one minute; the screen closes independently of credential-fetch completion. Tool abort, session reset, and shutdown also cancel the subprocess. `/assume cancel` preserves active credentials; `/assume clear` discards them. Browser fallback URLs and device codes are withheld with Granted's diagnostics: if the browser cannot open, authenticate outside Pi and retry.
+When SSO is needed, Granted opens the browser after approval/selection. A progress screen shows a spinner and countdown during selection or refresh. Press Escape (or your dialog-cancel key) to abort without clearing the previous role. Authentication times out after the configured `timeoutSeconds` (default one minute); the screen closes independently of credential-fetch completion. Tool abort, session reset, and shutdown also cancel the subprocess. `/assume cancel` preserves active credentials; `/assume clear` discards them. Browser fallback URLs and device codes are withheld with Granted's diagnostics: if the browser cannot open, authenticate outside Pi and retry.
 
 Only temporary credentials with a session token and a future expiration are accepted. They are reused in memory and refreshed on demand before the next `aws_bash` command within five minutes of expiry. No background refresh timers run, and no refresh occurs without an explicitly active role. Concurrent refresh/selection requests are serialized. Reset/clear invalidates pending work so late results cannot restore credentials.
 
@@ -231,7 +273,7 @@ Failed refresh prevents the pending shell command from executing with stale cred
 
 ### Known limitations
 
-- **Plain `bash` is unrestricted by design.** It can use your ambient AWS credentials and any profile, run Granted, read AWS files, or edit `.pi/aws-assume.json`. Policy edits only take effect after your `/reload`, and new profiles still need approval, but review policy changes you did not make.
+- **Plain `bash` is unrestricted by design.** It can use your ambient AWS credentials and any profile, run Granted, read AWS files, or edit `.pi/aws-assume.json`. Policy edits only take effect after your `/reload`. New profiles need approval unless a matching rule enables auto-approval; review policy changes you did not make.
 - The extension denies non-allowlisted names before asking approval or invoking Granted. In `aws_bash`, explicit `--profile` and `AWS_PROFILE`/`AWS_DEFAULT_PROFILE` assignments are rejected in common shell forms, even for allowed names: select through `assume_profile` and omit profile flags.
 - In `aws_bash`, common `assume`/`assumego`/`granted` command invocations, `aws configure`, `aws sso login`/`logout`, literal references to credential/policy paths (absolute, `~/`, `$HOME/`, or `${HOME}/` spellings), and any mention of the `aws-assume.json` policy file name are rejected. Plain `bash` is never checked.
 - In projects with an active policy, built-in file reads under `~/.aws`/`~/.granted` and configured AWS file paths are blocked, and built-in writes/edits to these stores or the project/global `aws-assume.json` policies are blocked, including symlink aliases.
@@ -255,6 +297,8 @@ npm run pack:check
 pnpm test
 pnpm run pack:check
 ```
+
+For edits to `src/*.js`, fully restart Pi to ensure the new helpers load; `/reload` can refresh the TypeScript entry point while retaining native JavaScript imports. AWS Assume detects incompatible cached policy/session helpers and leaves role access disabled with a restart notice. Configuration-only changes still use `/reload`.
 
 For an installed-Pi loader/command/tool smoke test, point `PI_CODING_AGENT_ENTRY` at the installed package's `dist/index.js`:
 

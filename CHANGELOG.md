@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0-beta.3] - 2026-10-17
+
+### Added
+
+- Optional `timeoutSeconds` for Granted authentication and lazy refresh: project overrides global, with a 60-second default. Both the progress screen and credential subprocess use the configured deadline. Settings alone never enable role access.
+- Optional per-rule `autoApprove`, defaulting to `false`, to skip first-use confirmation for matching concrete profiles. Only project rules and explicitly selected global rules participate; any matching `true` rule suffices when patterns overlap. Roles still require explicit selection and never activate automatically.
+
+### Changed
+
+- Read the global configuration for timeout defaults whenever the project defines or selects rules, even without selected global rule IDs. Unselected global rules still grant no access or auto-approval; invalid participating global configuration fails closed.
+- Include `autoApprovePatterns` in active-session status metadata so configured automatic approval is visible independently of remembered per-profile approvals.
+
+### Fixed
+
+- Detect incompatible JavaScript policy/session helpers retained during `/reload` after a code update. Keep role access disabled with a full-restart notice instead of throwing on the old policy return shape, reporting a stale trust reason, or silently ignoring auto-approval settings. Add same-process upgrade regression tests using the installed Pi loader; configuration-only changes still use `/reload`.
+
 ## [0.1.0-beta.2] - 2026-10-16
 
 ### Changed

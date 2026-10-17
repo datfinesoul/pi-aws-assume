@@ -7,6 +7,7 @@ export const NO_ACTIVE_PROFILE = "No AWS profile is active, so aws_bash did not 
 export class RoleSession {
   #profiles;
   #patterns;
+  #autoApprovePatterns;
   #approved = new Set();
   #active;
   #credentials;
@@ -19,8 +20,9 @@ export class RoleSession {
   #controller = new AbortController();
   #tail = Promise.resolve();
 
-  constructor({ profiles, availableProfiles = [], fetch, region, now = Date.now }) {
+  constructor({ profiles, autoApprovePatterns = [], availableProfiles = [], fetch, region, now = Date.now }) {
     this.#patterns = Object.freeze([...profiles]);
+    this.#autoApprovePatterns = Object.freeze([...autoApprovePatterns]);
     this.#profiles = resolveAllowedProfiles(this.#patterns, availableProfiles);
     this.#fetch = fetch;
     this.#region = region;
@@ -28,7 +30,8 @@ export class RoleSession {
   }
 
   status() {
-    return { profiles: [...this.#profiles], profilePatterns: [...this.#patterns], approvedProfiles: [...this.#approved],
+    return { profiles: [...this.#profiles], profilePatterns: [...this.#patterns],
+      autoApprovePatterns: [...this.#autoApprovePatterns], approvedProfiles: [...this.#approved],
       activeProfile: this.#active ?? null,
       expiresAt: this.#credentials ? new Date(this.#credentials.expiresAt).toISOString() : null };
   }
@@ -69,7 +72,7 @@ export class RoleSession {
     return this.#run(async ({ signal: combined, check }) => {
       if (!isAllowedProfile(profile, this.#patterns)) throw new AssumeError("That concrete profile name does not match the project allowlist.");
       if (!this.#approved.has(profile)) {
-        const approved = userInitiated || await confirm(profile, combined);
+        const approved = userInitiated || isAllowedProfile(profile, this.#autoApprovePatterns) || await confirm(profile, combined);
         check();
         if (!approved) throw new AssumeError("Profile approval declined; the active role is unchanged.");
         this.#approved.add(profile);

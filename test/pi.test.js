@@ -2,7 +2,7 @@
 // PI_CODING_AGENT_ENTRY=/path/to/pi-coding-agent/dist/index.js node --test test/pi.test.js
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -12,7 +12,7 @@ const extension = resolve(dirname(fileURLToPath(import.meta.url)), "../extension
 
 async function setup(t, { mode = "tui", dependency = true, trusted = true,
   profiles = ["test-a", "test-b"], configuredProfiles = ["test-a", "test-b"], writePolicy = true,
-  globalPolicy, projectGlobal } = {}) {
+  globalPolicy, projectGlobal, projectPolicy, extensionPath = extension } = {}) {
   const cwd = mkdtempSync(join(tmpdir(), "pi-assume-integration-"));
   const oldEnv = { ...process.env };
   t.after(() => {
@@ -23,7 +23,7 @@ async function setup(t, { mode = "tui", dependency = true, trusted = true,
   mkdirSync(join(cwd, ".pi"));
   mkdirSync(join(cwd, "bin"));
   if (writePolicy) writeFileSync(join(cwd, ".pi/aws-assume.json"), JSON.stringify({ global: projectGlobal,
-    profiles: profiles.map((pattern, n) => ({ id: `rule-${n}`, pattern })) }));
+    profiles: profiles.map((pattern, n) => ({ id: `rule-${n}`, pattern })), ...projectPolicy }));
   mkdirSync(join(cwd, "agent"));
   if (globalPolicy) writeFileSync(join(cwd, "agent/aws-assume.json"), JSON.stringify(globalPolicy));
   // Discovery tests must never read the developer's real AWS configuration or credentials.
@@ -52,7 +52,7 @@ async function setup(t, { mode = "tui", dependency = true, trusted = true,
   initTheme("dark");
   const runtime = createExtensionRuntime();
   runtime.getSettings = () => ({ shellPath: "/bin/bash", shellCommandPrefix: "export PI_ASSUME_PREFIX_CHECK=ok" });
-  const loaded = await loadExtensions([extension], cwd, undefined, runtime);
+  const loaded = await loadExtensions([extensionPath], cwd, undefined, runtime);
   assert.deepEqual(loaded.errors, []);
   assert.equal(loaded.extensions.length, 1);
   const ext = loaded.extensions[0];
@@ -90,6 +90,53 @@ async function setup(t, { mode = "tui", dependency = true, trusted = true,
   t.after(async () => { await emit("session_shutdown"); });
   return { cwd, configPath, log, emit, tool, call, metadata, count, shell, notices, widgets, ctx, ext,
     prompts: () => prompts, deny: () => { allow = false; } };
+}
+
+// Reproduce an in-process source upgrade, not just a new session with already-current imports.
+// The installed loader may keep native JS modules cached even after clearExtensionCache().
+for (const helper of ["policy", "session"]) {
+  test(`mixed-version reload reports a restart requirement for a cached ${helper} helper`, {
+    skip: !entry || (helper === "session" && process.platform !== "darwin"),
+  }, async (t) => {
+    const copy = mkdtempSync(join(tmpdir(), "pi-assume-reload-"));
+    t.after(() => rmSync(copy, { recursive: true, force: true }));
+    const root = resolve(dirname(extension), "../..");
+    cpSync(join(root, "src"), join(copy, "src"), { recursive: true });
+    cpSync(join(root, "extensions"), join(copy, "extensions"), { recursive: true });
+    writeFileSync(join(copy, "package.json"), '{"type":"module"}');
+    const path = join(copy, "src", `${helper}.js`);
+    const current = readFileSync(path, "utf8");
+    const previous = helper === "policy"
+      ? current.replace("export function loadPolicy(", "function loadCurrentPolicy(") + "\nexport function loadPolicy() { return []; }\n"
+      : current.replace("autoApprovePatterns: [...this.#autoApprovePatterns], ", "");
+    assert.notEqual(previous, current);
+    writeFileSync(path, previous);
+    const warm = join(copy, "warm.ts");
+    writeFileSync(warm, helper === "policy"
+      ? `import { loadPolicy } from "./src/policy.js"; export default function(pi) { pi.registerCommand("warm", { handler() { return loadPolicy({}); } }); }`
+      : `import { RoleSession } from "./src/session.js"; export default function(pi) { pi.registerCommand("warm", { handler() { return new RoleSession({ profiles: [] }).status(); } }); }`);
+    const loader = await import(new URL("./core/extensions/loader.js", pathToFileURL(resolve(entry))));
+    loader.clearExtensionCache();
+    const warmed = await loader.loadExtensions([warm], copy, undefined, loader.createExtensionRuntime());
+    assert.deepEqual(warmed.errors, []);
+    const oldValue = await warmed.extensions[0].commands.get("warm").handler();
+    if (helper === "policy") assert.deepEqual(oldValue, []);
+    else assert.equal(oldValue.autoApprovePatterns, undefined);
+    // Update the helper on disk and perform the same factory-cache reset as /reload.
+    writeFileSync(path, current);
+    loader.clearExtensionCache();
+    const env = await setup(t, { extensionPath: join(copy, "extensions/aws-assume/index.ts") });
+    const status = await env.metadata();
+    assert.equal(status.available, false);
+    assert.match(status.reason, /Fully exit and restart Pi/);
+    assert.match(status.reason, /\/reload cannot refresh these cached helpers/);
+    assert.doesNotMatch(status.reason, /project is not trusted|reading 'map'/);
+    assert.equal(env.tool("aws_bash").exposure, "hidden");
+    assert.equal(env.count(), 0);
+    assert.ok(env.notices.some((text) => /restart Pi/.test(text)));
+    await assert.rejects(env.call("assume", "test-a"), /restart Pi/);
+    assert.match((await env.emit("before_agent_start"))[0].message.content, /restart Pi/);
+  });
 }
 
 test("Pi loads the extension without session-side effects", { skip: !entry }, async (t) => {
@@ -202,6 +249,76 @@ test("project rules without global selections ignore global rules", {
   assert.deepEqual((await env.metadata()).profiles, ["test-a"]);
   await assert.rejects(env.call("assume", "test-b"), /allowlist/);
   assert.equal(env.count(), 0);
+});
+
+test("rule-level auto-approval applies to selected global and project matches only, including overlaps and new names", {
+  skip: !entry || process.platform !== "darwin",
+}, async (t) => {
+  const env = await setup(t, {
+    globalPolicy: { profiles: [
+      { id: "readonly", pattern: "example/*/readonly", autoApprove: true },
+      { id: "unselected", pattern: "**", autoApprove: true },
+    ] },
+    projectPolicy: { global: ["readonly"], profiles: [
+      { id: "manual", pattern: "example/**", autoApprove: false },
+      { id: "exact", pattern: "test-a", autoApprove: true },
+    ] },
+    configuredProfiles: ["example/a/readonly", "example/a/admin", "test-a", "outside"],
+  });
+  env.deny();
+  assert.equal(env.count(), 0);
+  assert.equal((await env.metadata()).activeProfile, null);
+  await env.call("assume", "example/a/readonly");
+  await env.call("assume", "example/new/readonly");
+  await env.call("assume", "test-a");
+  assert.equal(env.prompts(), 0);
+  assert.equal(env.count(), 3);
+  assert.deepEqual((await env.metadata()).autoApprovePatterns, ["example/*/readonly", "test-a"]);
+  await assert.rejects(env.call("assume", "example/a/admin"), /declined/);
+  await assert.rejects(env.call("assume", "example/org/team/readonly"), /declined/);
+  await assert.rejects(env.call("assume", "outside"), /allowlist/);
+  await assert.rejects(env.call("assume", "example/*/readonly"), /allowlist/);
+  assert.equal(env.count(), 3);
+  assert.equal(env.prompts(), 2);
+  await env.emit("session_start", { reason: "reload" });
+  assert.equal((await env.metadata()).activeProfile, null);
+  assert.deepEqual((await env.metadata()).approvedProfiles, []);
+  assert.equal(env.count(), 3);
+  await env.call("assume", "example/new/readonly");
+  assert.equal(env.prompts(), 2);
+  // Removing autoApprove takes effect at reload, including discarding earlier approvals.
+  writeFileSync(join(env.cwd, ".pi/aws-assume.json"), JSON.stringify({ profiles: [{ id: "exact", pattern: "test-a" }] }));
+  await env.emit("session_start", { reason: "reload" });
+  await assert.rejects(env.call("assume", "test-a"), /declined/);
+  assert.equal(env.count(), 4);
+  assert.equal(env.prompts(), 3);
+});
+
+test("configured timeout also bounds lazy refresh and prevents the pending shell from running", {
+  skip: !entry || process.platform !== "darwin", timeout: 10000,
+}, async (t) => {
+  const env = await setup(t, { projectPolicy: { timeoutSeconds: 2 } });
+  // Return credentials already inside the five-minute refresh window, without advancing the real clock.
+  writeFileSync(join(env.cwd, "bin/granted"), `#!${process.execPath}\nconsole.log(JSON.stringify({Version:1,AccessKeyId:'FAKE_ACCESS',SecretAccessKey:'FAKE_SECRET',SessionToken:'FAKE_TOKEN',Expiration:new Date(Date.now()+60000).toISOString()}));\n`, { mode: 0o755 });
+  await env.call("assume", "test-a");
+  writeFileSync(join(env.cwd, "bin/granted"), `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
+  let ready;
+  const installed = new Promise((resolve) => { ready = resolve; });
+  env.ctx.ui.custom = (factory) => new Promise((resolve) => {
+    const loader = factory({ requestRender() {} }, { fg: (_color, text) => text }, {}, (value) => {
+      loader.dispose();
+      resolve(value);
+    });
+    assert.match(loader.render(160).join("\n"), /Authentication timeout in 2s/);
+    ready();
+  });
+  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: Date.now() });
+  const pending = assert.rejects(env.shell(`${JSON.stringify(process.execPath)} -e 'require("node:fs").writeFileSync("marker", "ran")'`), /timed out/);
+  await installed;
+  t.mock.timers.tick(2000);
+  await pending;
+  assert.equal(existsSync(join(env.cwd, "marker")), false);
+  assert.equal((await env.metadata()).activeProfile, "test-a");
 });
 
 test("reminder is injected only when the active profile changes", { skip: !entry || process.platform !== "darwin" }, async (t) => {
@@ -398,10 +515,15 @@ test("authentication loader cancels command/tool work and preserves the previous
   }
 });
 
-test("command authentication closes its loader after the default one-minute timeout", {
+for (const [label, options, timeoutSeconds] of [
+  ["default", {}, 60],
+  ["global", { globalPolicy: { timeoutSeconds: 120 } }, 120],
+  ["project override", { globalPolicy: { timeoutSeconds: 120 }, projectPolicy: { timeoutSeconds: 3 } }, 3],
+]) {
+ test(`command authentication closes its loader at the ${label} timeout`, {
   skip: !entry || process.platform !== "darwin", timeout: 10000,
-}, async (t) => {
-  const env = await setup(t);
+ }, async (t) => {
+  const env = await setup(t, options);
   writeFileSync(join(env.cwd, "bin/granted"), `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
   const { InteractiveMode } = await import(new URL("./modes/interactive/interactive-mode.js", pathToFileURL(resolve(entry))));
   const editor = { getText: () => "", setText() {} };
@@ -430,28 +552,34 @@ test("command authentication closes its loader after the default one-minute time
     disposeActiveSelector() {}, keybindings: {},
   };
   env.ctx.ui.custom = (factory) => InteractiveMode.prototype.showExtensionCustom.call(host, factory);
-  // Keep the production deadline, but advance virtual time instead of waiting a real minute.
+  // Advance virtual time rather than waiting for authentication deadlines.
   t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: Date.now() });
+  const scheduled = [];
+  const schedule = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (...args) => { scheduled.push(args[1]); return schedule(...args); });
   const started = Date.now();
   const pending = env.ext.commands.get("assume").handler("use test-a", env.ctx);
   await installed;
   t.mock.timers.tick(1000);
-  assert.ok(countdownValues.has(59), "countdown updates after one virtual second");
-  t.mock.timers.tick(58999);
+  assert.ok(countdownValues.has(timeoutSeconds - 1), "countdown updates after one virtual second");
+  t.mock.timers.tick(timeoutSeconds * 1000 - 1001);
   assert.notEqual(focused, editor, "authentication must remain open before the deadline");
   t.mock.timers.tick(1);
   await pending;
   const elapsed = Date.now() - started;
   assert.equal(focused, editor, "timeout must restore focus to the editor");
-  assert.ok(countdownValues.has(60), "countdown starts at 60 seconds");
-  assert.ok(countdownValues.has(59), "countdown updates while waiting");
+  assert.ok(countdownValues.has(timeoutSeconds), "countdown starts at the configured timeout");
+  assert.ok(countdownValues.has(timeoutSeconds - 1), "countdown updates while waiting");
+  assert.equal(scheduled.filter((ms) => ms === timeoutSeconds * 1000).length, 2,
+    "screen and credential subprocess share the configured deadline");
   const finalRenders = renders;
   t.mock.timers.tick(350);
   assert.equal(renders, finalRenders, "countdown and spinner stop rendering after timeout");
-  assert.equal(elapsed, 60000, "production timeout remains one minute");
+  assert.equal(elapsed, timeoutSeconds * 1000);
   assert.ok(env.notices.some((text) => /timed out/.test(text)));
   assert.equal((await env.metadata()).activeProfile, null);
-});
+ });
+}
 
 test("AWS row right-aligns local-time expiry and stays within narrow terminal widths", {
   skip: !entry || process.platform !== "darwin",

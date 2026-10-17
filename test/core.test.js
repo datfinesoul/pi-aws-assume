@@ -30,7 +30,8 @@ test("policy supports exact names and path-style globs, remains immutable and de
   assert.throws(() => policy.profiles.push({ id: "admin", pattern: "admin" }));
   assert.throws(() => { policy.profiles[0].pattern = "admin"; });
   const dir = temporary(t);
-  assert.deepEqual(loadPolicy({ bundledPath: join(dir, "b.json"), globalPath: join(dir, "g.json"), projectPath: join(dir, "missing.json") }), []);
+  assert.deepEqual(loadPolicy({ bundledPath: join(dir, "b.json"), globalPath: join(dir, "g.json"), projectPath: join(dir, "missing.json") }),
+    { profiles: [], timeoutSeconds: 60 });
   assert.deepEqual(ownPatterns(JSON.stringify({ profiles: rules("glg/*/readonly", "glg/**", "team-?", "*") })), ["glg/*/readonly", "glg/**", "team-?", "*"]);
 });
 test("malformed or ambiguous policy fails closed without reflecting its content", () => {
@@ -126,6 +127,64 @@ test("approvals remain per concrete slash-delimited profile, never per matching 
   // Discovery is a picker snapshot, not the authority: a new concrete name must still match.
   await session.assume("glg/new/readonly", { confirm });
   assert.equal(prompted.at(-1), "glg/new/readonly");
+});
+test("auto-approval skips prompts only for matching allowed concrete profiles, including undiscovered names", async () => {
+  const fetched = [];
+  const prompted = [];
+  const session = new RoleSession({ profiles: ["example/**/readonly", "example/*/admin", "exact"],
+    autoApprovePatterns: ["example/*/readonly", "exact", "outside/**"],
+    fetch: async (profile) => { fetched.push(profile); return credentials(); }, now: () => now });
+  const confirm = async (profile) => { prompted.push(profile); return false; };
+  assert.equal(session.status().activeProfile, null);
+  assert.deepEqual(session.status().approvedProfiles, []);
+  assert.equal(fetched.length, 0, "config never activates a role");
+  await session.assume("example/new/readonly", { confirm });
+  await session.assume("exact", { confirm });
+  assert.deepEqual(prompted, []);
+  assert.deepEqual(session.status().approvedProfiles, ["example/new/readonly", "exact"]);
+  for (const profile of ["example/org/team/readonly", "example/team/admin"]) {
+    await assert.rejects(session.assume(profile, { confirm }), /declined/);
+  }
+  for (const profile of ["outside/team", "example/*/readonly", "EXAMPLE/team/readonly", "example//readonly"]) {
+    await assert.rejects(session.assume(profile, { confirm }), /allowlist/);
+  }
+  assert.deepEqual(prompted, ["example/org/team/readonly", "example/team/admin"]);
+  assert.deepEqual(fetched, ["example/new/readonly", "exact"]);
+  session.clear({ approvals: true });
+  assert.equal(session.status().activeProfile, null);
+  assert.deepEqual(session.status().approvedProfiles, []);
+  await assert.rejects(session.environment({}), /No AWS profile is active/);
+  await session.assume("example/new/readonly", { confirm });
+  assert.equal(prompted.length, 2, "configured auto-approval remains after reset without automatic activation");
+});
+test("any matching auto-approve rule suffices when patterns overlap", async () => {
+  const session = new RoleSession({ profiles: ["example/**", "example/*/readonly"],
+    autoApprovePatterns: ["example/*/readonly"], fetch: async () => credentials(), now: () => now });
+  await session.assume("example/team/readonly");
+  await assert.rejects(session.assume("example/team/admin"), /declined/);
+  assert.equal(session.status().activeProfile, "example/team/readonly");
+});
+test("auto-approved failed switches preserve the active role; reset cancels pending auto-approved work", async () => {
+  const gate = deferred();
+  let pending = false;
+  const session = new RoleSession({ profiles: ["a", "b"], autoApprovePatterns: ["*"], now: () => now,
+    fetch: async (profile) => {
+      if (pending) return gate.promise;
+      if (profile === "b") throw new AssumeError("fetch failed");
+      return credentials();
+    } });
+  await session.assume("a");
+  await assert.rejects(session.assume("b"), /fetch failed/);
+  assert.equal(session.status().activeProfile, "a");
+  assert.deepEqual(session.status().approvedProfiles, ["a", "b"]);
+  pending = true;
+  const operation = session.assume("b");
+  await delay(0);
+  session.clear({ approvals: true });
+  gate.resolve(credentials());
+  await assert.rejects(operation, /cancelled/);
+  assert.equal(session.status().activeProfile, null);
+  assert.deepEqual(session.status().approvedProfiles, []);
 });
 test("credential validation requires versioned, future, temporary credentials", () => {
   assert.equal(parseCredentials(JSON.stringify(wire(now + 3600000)), now).expiresAt, now + 3600000);
