@@ -17,10 +17,26 @@ import { checkPiVersion, isUsableVersion } from "../../src/version.js";
 
 const AWS_BASH = "aws_bash";
 // Reasons are plain sentences shared by user notices and model-facing output.
-const NO_POLICY = "This project has no AWS profile policy (.pi/aws-assume.json), or it defines no rules and selects no global rule IDs. Create the policy outside Pi, then /reload. See pi-aws-assume's README.md.";
+const NO_POLICY = [
+  "This project has no effective AWS Assume rules. You cannot select extension-managed profiles. You cannot use aws_bash.",
+  "Ordinary AWS commands may still use plain bash with the ambient AWS environment. These commands do not require an AWS Assume policy.",
+  "If you need extension-managed profiles, configure .pi/aws-assume.json outside Pi. Then run /reload.",
+].join("\n\n");
 const STALE_HELPERS = "AWS Assume's JavaScript helpers are from an older version. Fully exit and restart Pi to finish loading the extension update; /reload cannot refresh these cached helpers. No role access was enabled.";
 // Model-facing only; never shown in user notices.
-const SAFETY_GUIDANCE = "assume_profile is a Pi extension tool, not a shell command, function, or alias. Never probe for it with bash/type/which or search shell startup files. If its tool declaration is unavailable, report that the Pi tool is unavailable; ask the user to check extension loading and /reload, not to define a shell alias. If the task requires an assumed profile and role access or authentication is unavailable, stop and report the blocker. Do not fall back to ambient credentials, search credential stores, invoke AWS/Granted directly to obtain credentials, or modify project/global AWS policy or AWS profile files. The user manages setup outside Pi, then /reload. Plain bash otherwise keeps the ambient AWS environment. This is guidance, not a sandbox.";
+const SAFETY_GUIDANCE = [
+  "Use assume_profile and aws_bash only when the user or task clearly requires an extension-managed /assume profile. Otherwise, use plain bash. Plain bash keeps the ambient AWS environment. An ordinary AWS request does not by itself require an assumed profile.",
+  "If the user requests existing environment credentials, use plain bash. This path requires neither an AWS Assume policy nor an active /assume profile.",
+  "Missing AWS Assume setup disables only extension-managed profile access. It does not prohibit ordinary AWS commands through plain bash. Do not require AWS Assume setup solely to use credentials already available in the environment.",
+  "Do not substitute identities for a required assumed profile. If you cannot select or authenticate that profile, apply these rules:\n- Stop the task.\n- Report the blocker.\n- Do not silently substitute ambient credentials.\n- Do not search credential stores.\n- Do not invoke AWS/Granted directly to obtain substitute credentials.",
+  "Using ambient credentials is not a bypass when no assumed profile is required.",
+  "assume_profile is a Pi extension tool. It is not a shell command, function, or alias. Do not probe for assume_profile with bash/type/which. Do not search shell startup files for assume_profile.",
+  "If the tool declaration is unavailable, apply these steps:\n- Report a tool-loading problem.\n- Ask the user to check extension loading.\n- Ask the user to run /reload.",
+  "Do not modify the project's AWS Assume policy. Do not modify the global AWS Assume policy. Do not modify AWS profile files.",
+  "The user manages this setup outside Pi. The user then runs /reload.",
+  "For ambient credentials, let the AWS CLI or SDK use its normal credential resolution. Do not print credentials. Do not search credential stores.",
+  "This guidance is not a sandbox.",
+].join("\n\n");
 // Namespace access: an older Pi without this export must not fail at import time.
 const piVersion = (piAgent as { VERSION?: unknown }).VERSION;
 
@@ -64,11 +80,11 @@ export default function assumeExtension(pi: ExtensionAPI) {
       },
     }) : undefined);
   };
-  const unavailable = () => `assume: role access is unavailable. ${reason}`;
+  const unavailable = () => `assume: extension-managed profile access is unavailable. ${reason}`;
   // Tool errors carry model guidance; command errors stay short for the user.
   const requireSession = (ctx: ExtensionContext, audience: "model" | "user") => {
     if (ctx.mode !== "tui" || !ctx.isProjectTrusted() || !session) {
-      throw new AssumeError(audience === "model" ? `Role access is unavailable. ${reason} ${SAFETY_GUIDANCE}`
+      throw new AssumeError(audience === "model" ? `Extension-managed profile access is unavailable. ${reason} ${SAFETY_GUIDANCE}`
         : unavailable());
     }
     return session;
@@ -80,7 +96,7 @@ export default function assumeExtension(pi: ExtensionAPI) {
   function roleTool() {
     return {
       name: "assume_profile", label: "AWS profile", exposure: "model-only" as const,
-      description: "Select one of this project's allowed AWS profiles for aws_bash. Use only when the user or task clearly requires an assumed /assume profile; when unclear, do not use it and use plain bash with the ambient AWS environment. Actions: list concrete allowed profile names (100 per page; use nextOffset), status, assume a concrete profile name, cancel pending authentication, or clear the active profile. Unless a matching policy rule has autoApprove enabled, approval is once per concrete profile per session, never per wildcard rule. Credential-fetch output is not exposed. This is a Pi tool, not a shell command or alias. Always available for status diagnostics even when role access is disabled; status reports the setup blocker. If an assumed profile is required but unavailable, stop and report it; do not hunt for credentials or bypass this tool.",
+      description: "Select one of this project's allowed AWS profiles for aws_bash. Use assume_profile only when the user or task clearly requires an extension-managed /assume profile. Otherwise, use plain bash with the ambient AWS environment. Do not call assume_profile merely because a task mentions AWS. Ordinary AWS commands can use plain bash with ambient credentials. This use does not require an AWS Assume policy. Actions: list concrete allowed profile names (100 per page; use nextOffset), status, assume a concrete profile name, cancel pending authentication, or clear the active profile. Unless a matching policy rule has autoApprove enabled, approval is once per concrete profile per session, never per wildcard rule. Credential-fetch output is not exposed. This is a Pi tool, not a shell command or alias. Always available for status diagnostics even when extension-managed profile access is disabled; status reports the setup blocker. If an assumed profile is required but unavailable, stop and report it; do not hunt for credentials or bypass this tool.",
       parameters: Type.Object({
         action: StringEnum(["list", "status", "assume", "cancel", "clear"] as const),
         profile: Type.Optional(Type.String({ description: "Concrete profile name matching the project allowlist; required for assume. Never pass a wildcard here." })),
@@ -119,7 +135,7 @@ export default function assumeExtension(pi: ExtensionAPI) {
       name: AWS_BASH, label: "AWS bash", exposure: "hidden" as const,
       description: "Inactive AWS profile shell.",
       parameters: Type.Object({ command: Type.String() }),
-      async execute() { throw new AssumeError(`Role access is unavailable. ${reason} ${SAFETY_GUIDANCE}`); },
+      async execute() { throw new AssumeError(`Extension-managed profile access is unavailable. ${reason} ${SAFETY_GUIDANCE}`); },
     };
   }
   const deactivate = () => {
@@ -313,7 +329,7 @@ export default function assumeExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", () => {
     const state = session
       ? `active /assume profile is ${session.status().activeProfile ?? "none"}. Use assume_profile and aws_bash only when the user or task clearly requires one of this project's allowed profiles; when unclear, do not use them.`
-      : `role access is unavailable and aws_bash is not provided. Reason: ${reason} Use assume_profile action=status for diagnostics.`;
+      : `extension-managed profile access is unavailable and aws_bash is not provided. Reason: ${reason} Use assume_profile action=status for diagnostics.`;
     if (announced === state) return;
     announced = state;
     return { message: { customType: "assume-context", display: false, content: `AWS context: ${state} ${SAFETY_GUIDANCE}` } };

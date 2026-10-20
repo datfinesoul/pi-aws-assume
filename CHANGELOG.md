@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-20
+
+### Fixed
+
+- Clarify that ordinary AWS requests and requests to use existing environment credentials can use plain `bash` without an AWS Assume policy or active profile. Missing setup blocks only extension-managed profile access; tasks requiring an assumed profile must still stop rather than substitute credentials when that profile is unavailable.
+
 ## [0.3.0] - 2026-10-17
 
 ### Changed
