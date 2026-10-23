@@ -1,6 +1,7 @@
 import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import { delimiter, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { discoverProfileRegion } from "./profiles.js";
 
 export class AssumeError extends Error {
   constructor(message) { super(message); this.name = "AssumeError"; }
@@ -32,10 +33,15 @@ export const IDENTITY_KEYS = new Set([
 
 export const FALLBACK_REGION = "us-east-1";
 
-// Region order: inherited AWS_REGION, inherited AWS_DEFAULT_REGION, the profile's configured
-// region, then FALLBACK_REGION. A CLI --region or explicit SDK region still overrides it.
+// Preserve inherited region precedence within a partition, but never let an ambient
+// China/non-China mismatch redirect a configured profile into the other partition.
+// A CLI --region or explicit SDK region still overrides the resulting environment.
 export function resolveRegion(base, profileRegion) {
-  return base.AWS_REGION || base.AWS_DEFAULT_REGION || profileRegion || FALLBACK_REGION;
+  const inherited = base.AWS_REGION || base.AWS_DEFAULT_REGION;
+  if (profileRegion && inherited && profileRegion.startsWith("cn-") !== inherited.startsWith("cn-")) {
+    return profileRegion;
+  }
+  return inherited || profileRegion || FALLBACK_REGION;
 }
 
 export function shellEnvironment(base, credentials, profileRegion) {
@@ -69,8 +75,8 @@ export function parseCredentials(text, now = Date.now()) {
     sessionToken: value.SessionToken, expiresAt });
 }
 
-function grantedEnvironment(base) {
-  const env = shellEnvironment(base);
+function grantedEnvironment(base, profile) {
+  const env = shellEnvironment(base, undefined, discoverProfileRegion(profile, { env: base }));
   // The trusted credential resolver still needs the user's configured profile files/browser settings.
   for (const key of Object.keys(base)) {
     if (key === "AWS_CONFIG_FILE" || key === "AWS_SHARED_CREDENTIALS_FILE" || key.startsWith("GRANTED_")) env[key] = base[key];
@@ -87,7 +93,7 @@ export function fetchCredentials(executable, profile, { signal, env = process.en
       // lets an open browser hold the pipe and delay the 'close' event long after Granted exits.
       // detached keeps Granted and the browser it launches out of Pi's process group, so terminal
       // signals aimed at Pi do not reach them. Only this pid is ever signalled, never the group.
-      env: grantedEnvironment(env), stdio: ["ignore", "pipe", "ignore"], detached: process.platform !== "win32",
+      env: grantedEnvironment(env, profile), stdio: ["ignore", "pipe", "ignore"], detached: process.platform !== "win32",
     });
     let output = "";
     let bytes = 0;
