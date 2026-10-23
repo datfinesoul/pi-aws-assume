@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-23
+
+### Fixed
+
+- Support AWS China profiles in `cn-north-1` and `cn-northwest-1` during Granted authentication and assumed shell execution. Granted now uses the selected profile's configured region unless an inherited region takes precedence within the same partition. An inherited China/non-China region mismatch no longer redirects the profile to the other partition. Existing region precedence within a partition and the `us-east-1` fallback remain unchanged.
+
 ## [0.3.1] - 2026-10-20
 
 ### Fixed

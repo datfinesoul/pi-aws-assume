@@ -255,6 +255,28 @@ test("region order: inherited AWS_REGION, inherited AWS_DEFAULT_REGION, profile 
   assert.equal(region({}), "us-east-1");
   assert.equal(shellEnvironment({}, credentials(), "us-west-2").AWS_DEFAULT_REGION, "us-west-2");
 });
+for (const region of ["cn-north-1", "cn-northwest-1"]) {
+  test(`${region} is retained through discovery, authentication, and active shells`, async (t) => {
+    const dir = temporary(t);
+    const config = join(dir, "config");
+    writeFileSync(config, `[profile china]\nregion=${region}\n[profile commercial]\nregion=us-west-2\n`);
+    assert.equal(parseProfileRegion(readFileSync(config, "utf8"), "china"), region);
+    const executable = join(dir, "granted");
+    writeFileSync(executable, `#!${process.execPath}\nif (process.env.AWS_REGION !== '${region}' || process.env.AWS_DEFAULT_REGION !== '${region}') process.exit(8);\nconsole.log(JSON.stringify(${JSON.stringify(wire())}));\n`, { mode: 0o755 });
+    for (const ambient of [{}, { AWS_REGION: "us-east-1" }, { AWS_DEFAULT_REGION: "eu-west-1" }]) {
+      const env = { ...ambient, AWS_CONFIG_FILE: config };
+      await fetchCredentials(executable, "china", { env });
+      const session = new RoleSession({ profiles: ["china"], fetch: async () => credentials(), now: () => now,
+        region: (profile) => discoverProfileRegion(profile, { env }) });
+      await session.assume("china", { userInitiated: true });
+      const shell = await session.environment(env);
+      assert.equal(shell.AWS_REGION, region);
+      assert.equal(shell.AWS_DEFAULT_REGION, region);
+    }
+    assert.equal(shellEnvironment({ AWS_REGION: region }, credentials(), "us-west-2").AWS_REGION, "us-west-2");
+    assert.equal(shellEnvironment({ AWS_REGION: region }, credentials(), "cn-north-1").AWS_REGION, region);
+  });
+}
 test("profile region discovery reads only the named profile's region and fails quietly", (t) => {
   const text = "[default]\nregion = eu-central-1\n[profile dev]\nsso_session = x\nregion=us-west-2 ; comment\naws_secret_access_key = FAKE_SECRET\n[profile other]\nregion = ap-south-1\n[sso-session dev]\nregion = eu-west-1\n[profile bad]\nregion = $(whoami)\n";
   assert.equal(parseProfileRegion(text, "dev"), "us-west-2");
