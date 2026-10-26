@@ -36,12 +36,18 @@ export const FALLBACK_REGION = "us-east-1";
 // Preserve inherited region precedence within a partition, but never let an ambient
 // China/non-China mismatch redirect a configured profile into the other partition.
 // A CLI --region or explicit SDK region still overrides the resulting environment.
-export function resolveRegion(base, profileRegion) {
+export function resolveRegionDetails(base, profileRegion, profileSource = "profile.region") {
   const inherited = base.AWS_REGION || base.AWS_DEFAULT_REGION;
   if (profileRegion && inherited && profileRegion.startsWith("cn-") !== inherited.startsWith("cn-")) {
-    return profileRegion;
+    return { region: profileRegion, source: profileSource };
   }
-  return inherited || profileRegion || FALLBACK_REGION;
+  if (inherited) return { region: inherited, source: base.AWS_REGION ? "AWS_REGION" : "AWS_DEFAULT_REGION" };
+  if (profileRegion) return { region: profileRegion, source: profileSource };
+  return { region: FALLBACK_REGION, source: "default" };
+}
+
+export function resolveRegion(base, profileRegion) {
+  return resolveRegionDetails(base, profileRegion).region;
 }
 
 export function shellEnvironment(base, credentials, profileRegion) {

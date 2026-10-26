@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { parsePolicyFile, loadPolicy, matchesProfilePattern, resolveAllowedProfiles } from "../src/policy.js";
-import { discoverProfileNames, discoverProfileRegion, parseProfileNames, parseProfileRegion } from "../src/profiles.js";
-import { AssumeError, fetchCredentials, findGranted, parseCredentials, safeMessage, shellEnvironment } from "../src/credentials.js";
+import { discoverProfileNames, discoverProfileRegion, discoverProfileRegionDetails, parseProfileNames, parseProfileRegion, parseProfileRegionDetails } from "../src/profiles.js";
+import { AssumeError, fetchCredentials, findGranted, parseCredentials, resolveRegionDetails, safeMessage, shellEnvironment } from "../src/credentials.js";
 import { createGuards } from "../src/guards.js";
 import { RoleSession } from "../src/session.js";
 import { checkPiVersion, isUsableVersion, parseVersion } from "../src/version.js";
@@ -255,11 +255,11 @@ test("region order: inherited AWS_REGION, inherited AWS_DEFAULT_REGION, profile 
   assert.equal(region({}), "us-east-1");
   assert.equal(shellEnvironment({}, credentials(), "us-west-2").AWS_DEFAULT_REGION, "us-west-2");
 });
-for (const region of ["cn-north-1", "cn-northwest-1"]) {
-  test(`${region} is retained through discovery, authentication, and active shells`, async (t) => {
+for (const region of ["cn-north-1", "cn-northwest-1"]) for (const field of ["region", "sso_region"]) {
+  test(`${region} from ${field} is retained through discovery, authentication, status, and active shells`, async (t) => {
     const dir = temporary(t);
     const config = join(dir, "config");
-    writeFileSync(config, `[profile china]\nregion=${region}\n[profile commercial]\nregion=us-west-2\n`);
+    writeFileSync(config, `[profile china]\n${field}=${region}\n[profile commercial]\nregion=us-west-2\n`);
     assert.equal(parseProfileRegion(readFileSync(config, "utf8"), "china"), region);
     const executable = join(dir, "granted");
     writeFileSync(executable, `#!${process.execPath}\nif (process.env.AWS_REGION !== '${region}' || process.env.AWS_DEFAULT_REGION !== '${region}') process.exit(8);\nconsole.log(JSON.stringify(${JSON.stringify(wire())}));\n`, { mode: 0o755 });
@@ -267,16 +267,60 @@ for (const region of ["cn-north-1", "cn-northwest-1"]) {
       const env = { ...ambient, AWS_CONFIG_FILE: config };
       await fetchCredentials(executable, "china", { env });
       const session = new RoleSession({ profiles: ["china"], fetch: async () => credentials(), now: () => now,
-        region: (profile) => discoverProfileRegion(profile, { env }) });
+        region: (profile) => discoverProfileRegionDetails(profile, { env }) });
       await session.assume("china", { userInitiated: true });
       const shell = await session.environment(env);
       assert.equal(shell.AWS_REGION, region);
       assert.equal(shell.AWS_DEFAULT_REGION, region);
+      const status = session.status(env);
+      assert.equal(status.profileRegion, region);
+      assert.equal(status.profileRegionSource, `profile.${field}`);
+      assert.equal(status.region, region);
+      assert.equal(status.regionSource, `profile.${field}`);
     }
     assert.equal(shellEnvironment({ AWS_REGION: region }, credentials(), "us-west-2").AWS_REGION, "us-west-2");
     assert.equal(shellEnvironment({ AWS_REGION: region }, credentials(), "cn-north-1").AWS_REGION, region);
   });
 }
+test("region diagnostics identify inherited, configured, SSO fallback, and default sources", () => {
+  assert.deepEqual(resolveRegionDetails({ AWS_REGION: "eu-west-1", AWS_DEFAULT_REGION: "us-west-2" }, "cn-north-1", "profile.sso_region"),
+    { region: "cn-north-1", source: "profile.sso_region" });
+  assert.deepEqual(resolveRegionDetails({ AWS_REGION: "eu-west-1", AWS_DEFAULT_REGION: "us-west-2" }, "us-east-1"),
+    { region: "eu-west-1", source: "AWS_REGION" });
+  assert.deepEqual(resolveRegionDetails({ AWS_DEFAULT_REGION: "us-west-2" }, "us-east-1"),
+    { region: "us-west-2", source: "AWS_DEFAULT_REGION" });
+  assert.deepEqual(resolveRegionDetails({}, "us-west-2"), { region: "us-west-2", source: "profile.region" });
+  assert.deepEqual(resolveRegionDetails({}, "eu-west-1", "profile.sso_region"), { region: "eu-west-1", source: "profile.sso_region" });
+  assert.deepEqual(resolveRegionDetails({}), { region: "us-east-1", source: "default" });
+});
+test("explicit profile region wins over inline sso_region, regardless of field order", () => {
+  for (const fields of ["region=cn-northwest-1\nsso_region=cn-north-1", "sso_region=cn-north-1\nregion=cn-northwest-1"]) {
+    assert.deepEqual(parseProfileRegionDetails(`[profile china]\n${fields}\n`, "china"),
+      { region: "cn-northwest-1", source: "profile.region" });
+  }
+  const text = "[default]\nsso_region=eu-west-1\n[profile china]\nsso_region=cn-north-1 # comment\n[profile invalid]\nsso_region=$(whoami)\n[sso-session other]\nsso_region=cn-northwest-1\n";
+  assert.deepEqual(parseProfileRegionDetails(text, "china"), { region: "cn-north-1", source: "profile.sso_region" });
+  assert.deepEqual(parseProfileRegionDetails(text, "default"), { region: "eu-west-1", source: "profile.sso_region" });
+  assert.equal(parseProfileRegionDetails(text, "invalid"), undefined);
+  assert.equal(parseProfileRegionDetails(text, "missing"), undefined);
+});
+test("session region diagnostics follow inherited overrides, profile switches, and clear", async () => {
+  const session = new RoleSession({ profiles: ["a", "b"], fetch: async () => credentials(), now: () => now,
+    region: (profile) => profile === "a" ? { region: "us-west-2", source: "profile.sso_region" } : undefined });
+  assert.equal(session.status({}).region, null);
+  await session.assume("a", { userInitiated: true });
+  assert.equal(session.status({}).regionSource, "profile.sso_region");
+  assert.equal(session.status({ AWS_REGION: "eu-west-1" }).regionSource, "AWS_REGION");
+  assert.equal((await session.environment({ AWS_REGION: "eu-west-1" })).AWS_REGION, session.status({ AWS_REGION: "eu-west-1" }).region);
+  await session.assume("b", { userInitiated: true });
+  assert.equal(session.status({}).region, "us-east-1");
+  assert.equal(session.status({}).regionSource, "default");
+  assert.equal(session.status({}).profileRegion, null);
+  assert.equal(session.status({}).profileRegionSource, null);
+  session.clear();
+  assert.equal(session.status({}).region, null);
+  assert.equal(session.status({}).regionSource, null);
+});
 test("profile region discovery reads only the named profile's region and fails quietly", (t) => {
   const text = "[default]\nregion = eu-central-1\n[profile dev]\nsso_session = x\nregion=us-west-2 ; comment\naws_secret_access_key = FAKE_SECRET\n[profile other]\nregion = ap-south-1\n[sso-session dev]\nregion = eu-west-1\n[profile bad]\nregion = $(whoami)\n";
   assert.equal(parseProfileRegion(text, "dev"), "us-west-2");
@@ -340,6 +384,22 @@ test("approval is once per profile; user selection counts; clear keeps approvals
   session.clear({ approvals: true });
   assert.deepEqual(session.status().approvedProfiles, []);
   assert.equal(session.status().activeProfile, null);
+});
+test("user selection permits direct shell environments without another assume or approval", async () => {
+  let fetches = 0;
+  let prompts = 0;
+  const session = new RoleSession({ profiles: ["dev"], now: () => now,
+    fetch: async () => { fetches++; return credentials(); } });
+  await session.assume("dev", { userInitiated: true, confirm: async () => { prompts++; return false; } });
+  const selected = session.status();
+  assert.equal(selected.activeProfile, "dev");
+  assert.deepEqual(selected.approvedProfiles, ["dev"]);
+  for (let i = 0; i < 2; i++) {
+    assert.equal((await session.environment({})).AWS_ACCESS_KEY_ID, "FAKE_ACCESS");
+  }
+  assert.equal(fetches, 1);
+  assert.equal(prompts, 0);
+  assert.deepEqual(session.status(), selected);
 });
 test("denial and failed switch leave the existing role unchanged", async () => {
   const session = new RoleSession({ profiles: ["a", "b"], fetch: async (p) => {

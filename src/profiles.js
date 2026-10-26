@@ -55,10 +55,11 @@ function configPath({ env, home, cwd }) {
 
 const REGION = /^[a-z]{2,}(?:-[a-z0-9]+){1,4}$/;
 
-// Retain only the named profile's `region` value from config text; nothing else is kept.
-export function parseProfileRegion(text, profile) {
+// Retain region metadata only. An explicit operational region wins over the SSO fallback.
+export function parseProfileRegionDetails(text, profile) {
   let inProfile = false;
   let region;
+  let ssoRegion;
   for (const line of text.split(/\r?\n/)) {
     const section = /^\s*\[([^\]\r\n]+)\]\s*(?:[#;].*)?$/.exec(line);
     if (section) {
@@ -67,20 +68,32 @@ export function parseProfileRegion(text, profile) {
       continue;
     }
     if (!inProfile) continue;
-    const match = /^\s*region\s*=\s*([^\s#;]+)\s*(?:[#;].*)?$/.exec(line);
-    if (match && REGION.test(match[1])) region = match[1];
+    const match = /^\s*(region|sso_region)\s*=\s*([^\s#;]+)\s*(?:[#;].*)?$/.exec(line);
+    if (!match || !REGION.test(match[2])) continue;
+    if (match[1] === "region") region = match[2];
+    else ssoRegion = match[2];
   }
-  return region;
+  if (region) return { region, source: "profile.region" };
+  if (ssoRegion) return { region: ssoRegion, source: "profile.sso_region" };
+  return undefined;
+}
+
+export function parseProfileRegion(text, profile) {
+  return parseProfileRegionDetails(text, profile)?.region;
 }
 
 // Best effort: any failure means "no configured region" and never surfaces file content.
-export function discoverProfileRegion(profile, { env = process.env, home = homedir(), cwd = process.cwd() } = {}) {
+export function discoverProfileRegionDetails(profile, { env = process.env, home = homedir(), cwd = process.cwd() } = {}) {
   try {
     const text = readLimited(configPath({ env, home, cwd }));
-    return text === undefined ? undefined : parseProfileRegion(text, profile);
+    return text === undefined ? undefined : parseProfileRegionDetails(text, profile);
   } catch {
     return undefined;
   }
+}
+
+export function discoverProfileRegion(profile, options) {
+  return discoverProfileRegionDetails(profile, options)?.region;
 }
 
 export function discoverProfileNames({ env = process.env, home = homedir(), cwd = process.cwd() } = {}) {

@@ -7,7 +7,7 @@ A [Pi](https://github.com/earendil-works/pi) extension that runs assistant comma
 > [!IMPORTANT]
 > - **Each project must enable access.** Define rules or select global rule IDs in `.pi/aws-assume.json` to enable role access and `aws_bash`. Some guards also require this policy. Policy-file write/edit guards apply whenever the extension loads. `assume_profile` remains visible for setup diagnostics but grants no access by itself.
 > - **Separate shell tool.** Only `aws_bash` receives assumed credentials. Plain `bash` keeps the ambient AWS environment.
-> - **Explicit use.** The assistant uses `aws_bash` only when the user or task clearly requires an allowed `/assume` profile. Otherwise, it uses plain `bash`.
+> - **Active profile.** The assistant uses `aws_bash` for AWS requests when a `/assume` profile is active. Explicit requests for ambient credentials use plain `bash`. Without an active profile, ordinary AWS requests use plain `bash`. The assistant selects a profile only when the user or task requires one.
 > - **Not a credential sandbox.** The allowlist and approval do not restrict plain `bash` or other execution tools. See [Known limitations](#known-limitations).
 
 ## Installation
@@ -76,11 +76,15 @@ Without project rules or selected global rules, `/assume status` explains why ro
 | `/assume use <profile>` | Explicitly select an allowed profile, including names such as `status`. |
 | `/assume <profile>` | Select an allowed profile with shorthand syntax, except reserved command names. |
 | `/assume list [offset]` | List up to 100 concrete matching names without authentication. `nextOffset` identifies the next page. |
-| `/assume status` | Show the active profile, policy rules, expiry, and first 100 profile/approval names with total counts. Show no secrets. |
+| `/assume status` | Show the active profile, region diagnostics, policy rules, expiry, and first 100 profile/approval names with total counts. Show no secrets. |
 | `/assume cancel` | Cancel pending authentication and queued role work. Preserve the previously active credentials and per-session approvals. |
 | `/assume clear` | Clear active credentials. Cancel pending authentication. Preserve existing per-session approvals. |
 
-For assistant-driven use, `assume_profile` selects the profile and `aws_bash` runs commands. Both tools are available only to the model. Neither tool is available through codemode scripts because either can open approval or authentication dialogs.
+Your `/assume` selection sets the default profile for subsequent AWS requests. The assistant uses `aws_bash` directly with that profile. It does not request approval again or repeat `assume_profile action=assume`. If the active profile is unclear, the assistant checks `assume_profile action=status`.
+
+Explicit requests for ambient credentials or existing environment credentials use plain `bash`, even when a profile is active. Requests for another profile require a profile switch. Without an active profile, the assistant uses plain `bash` unless the user or task requires an allowed `/assume` profile.
+
+For assistant-driven selection or profile switches, `assume_profile` selects the profile. The `aws_bash` tool runs commands with the active profile. Both tools are available only to the model. Neither tool is available through codemode scripts because either can open approval or authentication dialogs.
 
 `assume_profile` remains visible without usable setup. Its `status` action returns `available: false`, a reason, and safety guidance. All other actions refuse to run until prerequisites pass. The extension exposes `aws_bash` only when role access is enabled.
 
@@ -90,6 +94,8 @@ For assistant-driven use, `assume_profile` selects the profile and `aws_bash` ru
 - `assume` requires a concrete `profile`, never a wildcard.
 - `list` accepts an optional integer `offset`. It returns up to 100 names, `totalProfiles`, and `nextOffset`. The picker and completions show all discovered matches.
 - `aws_bash` accepts the same input as `bash`. It uses Pi's configured shell and command prefix. Without an active profile, it refuses to run. It never substitutes ambient credentials.
+
+Both status interfaces include region diagnostics for the active profile. The `profileRegion` and `profileRegionSource` fields identify its configured default. The `region` and `regionSource` fields identify the effective default before command or SDK overrides. Sources are `profile.region`, `profile.sso_region`, `AWS_REGION`, `AWS_DEFAULT_REGION`, or `default`. Missing profile metadata produces null profile fields. Without an active profile, all four fields are null.
 
 Unless matching rules enable automatic approval, approval applies to each concrete profile, not each wildcard. See [Automatically approve matching profiles](#automatically-approve-matching-profiles). Approval for `example/team-a/readonly` does not approve `example/team-b/readonly`. Your own `/assume` selection counts as approval. Selecting a previously approved profile again in the same session does not prompt again.
 
@@ -287,7 +293,7 @@ Concrete profile names must start with an ASCII letter or digit. They can contai
 - **Project-controlled access.** A trusted project must define or select rules in `.pi/aws-assume.json`. Global installation alone grants no access through the extension.
 - **Separate credential scope.** Only `aws_bash` receives selected temporary credentials. The extension first removes inherited AWS identity variables from that tool's environment. Plain `bash` retains ambient credentials and access to other host credential sources.
 - **Awareness without authorization.** Status diagnostics and a model-facing context reminder remain available when role access is disabled. If a task requires an assumed profile but setup or authentication is unavailable, the assistant must stop and report the blocker. It must not substitute ambient credentials, search credential stores, obtain credentials directly through AWS/Granted, or edit AWS policy/profile files. The user manages setup outside Pi, then runs `/reload`. Tasks that do not require an assumed profile can still use plain `bash` with its ambient environment. This guidance is not technical enforcement.
-- **Region selection.** Granted authentication and `aws_bash` use inherited `AWS_REGION`, then inherited `AWS_DEFAULT_REGION`, then the selected profile's AWS config `region`, then `us-east-1`. If inherited and configured regions cross the China/non-China partition boundary, the profile region takes precedence. This supports `cn-north-1` and `cn-northwest-1` without an inherited commercial region redirecting requests. It also protects commercial profiles from an inherited China region. Configure the operational `region` on China profiles instead of relying on the commercial fallback. A CLI `--region` or explicit SDK region still wins.
+- **Region selection.** The selected profile's explicit `region` defines its operational default. If `region` is absent, the extension uses `sso_region` from that profile section. Granted's subprocess and `aws_bash` use inherited `AWS_REGION`, then inherited `AWS_DEFAULT_REGION`, then this profile default, then `us-east-1`. If inherited and profile regions cross the China/non-China partition boundary, the profile default wins. This also applies to the `sso_region` fallback. Precedence within a partition is unchanged. A CLI `--region` or explicit SDK region still wins.
 - **Memory-only state.** The extension never persists credentials or approvals. It never automatically reactivates a role. Granted's own cache is separate.
 - **macOS/Linux, Granted, interactive mode.** This alpha does not support other platforms, credential tools, or non-interactive modes for role access.
 - **Not a sandbox.** See [Known limitations](#known-limitations).
@@ -353,7 +359,9 @@ Each `aws_bash` command receives a fresh environment copy. The extension removes
 - Custom AWS config and credential path variables.
 - `GRANTED_*` session variables.
 
-Operational `AWS_REGION` and `AWS_DEFAULT_REGION` follow the [region order](#assumptions-and-design-choices). At selection, the extension reads the profile's region from the AWS config file and retains only that value. Granted still uses the profile's configured **SSO authentication region**. That region is separate from the operational region.
+Operational `AWS_REGION` and `AWS_DEFAULT_REGION` follow the [region order](#assumptions-and-design-choices). At selection, the extension retains only the profile's region default and its source. It checks `region` first, then inline `sso_region`. It does not inherit `sso_region` from a separate `[sso-session ...]` section. Region discovery remains best effort. Missing or unreadable configuration supplies no profile default.
+
+Granted still uses the configured SSO authentication region for sign-in. The desired resource region can differ. Set an explicit operational `region`, CLI `--region`, or SDK region when the SSO fallback is not appropriate.
 
 A failed refresh prevents the pending shell command from running with stale credentials. Each launched command receives a credential snapshot. Switching or clearing a profile does not revoke that snapshot or change running or background processes. A long-running process can outlive its credentials.
 

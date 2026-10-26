@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-26
+
+### Fixed
+
+- Use the active `/assume` profile for AWS requests without another approval request or profile selection. Explicit requests for ambient credentials still use plain `bash`. Without an active profile, ordinary AWS requests still use plain `bash`.
+- Share execution rules across model context, tool descriptions, and prompt guidelines. Direct the assistant to check status when the active profile is unclear.
+- Use the selected profile's inline `sso_region` when it defines no explicit operational `region`. Apply the China/non-China partition check to this fallback during Granted authentication and `aws_bash` execution.
+- Require a full Pi restart when cached helpers lack the new region metadata support.
+
+### Added
+
+- Include the configured profile region, effective default region, and their sources in command and tool status. These diagnostics contain no credentials.
+
 ## [0.3.2] - 2026-10-23
 
 ### Fixed
