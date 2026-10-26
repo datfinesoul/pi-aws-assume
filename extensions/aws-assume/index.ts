@@ -377,6 +377,10 @@ export default function assumeExtension(pi: ExtensionAPI) {
     },
     async handler(args, ctx) {
       try {
+        if (!args.trim() && !session && reason === NO_POLICY) {
+          ctx.ui.notify("No AWS profiles are enabled for this project. Configure .pi/aws-assume.json, then run /reload.", "info");
+          return;
+        }
         if (args.trim() === "status" && !session) {
           ctx.ui.notify(unavailable(), "info");
           return;

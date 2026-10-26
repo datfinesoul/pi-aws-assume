@@ -250,6 +250,10 @@ for (const [label, options] of [["missing", { writePolicy: false }], ["empty", {
     assert.deepEqual(await env.emit("before_agent_start"), [undefined]);
     for (const action of ["list", "clear", "cancel"]) await assert.rejects(env.call(action), /no effective AWS Assume rules/);
     await assert.rejects(env.shell("echo must-not-run"), /no effective AWS Assume rules/);
+    for (const input of ["", "   "]) {
+      await env.ext.commands.get("assume").handler(input, env.ctx);
+      assert.equal(env.notices.at(-1), "No AWS profiles are enabled for this project. Configure .pi/aws-assume.json, then run /reload.");
+    }
     for (const action of ["status", "list", "clear", "some-profile"]) {
       await env.ext.commands.get("assume").handler(action, env.ctx);
       assert.match(env.notices.at(-1), /^assume: extension-managed profile access is unavailable\. This project has no effective AWS Assume rules/);
