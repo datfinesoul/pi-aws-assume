@@ -92,11 +92,21 @@ async function setup(t, { mode = "tui", dependency = true, trusted = true,
     prompts: () => prompts, deny: () => { allow = false; } };
 }
 
-// Check emitted guidance, not model behavior: ordinary AWS requests and explicit ambient-credential
-// requests must stay separate from a required assumed-profile operation that cannot authenticate.
+// Check emitted guidance, not model decisions. Active profiles supply the default AWS context.
+// Explicit ambient requests and requests without an active profile must retain their separate rules.
 function assertExecutionGuidance(text) {
+  assert.match(text, /If the user requests ambient credentials or existing environment credentials, use plain bash\./);
+  assert.match(text, /Otherwise, use aws_bash for AWS requests when a \/assume profile is active, unless the user requests another profile\./);
+  assert.match(text, /The active profile is already selected and approved for this session\./);
+  assert.match(text, /Do not ask for approval to use the active profile\./);
+  assert.match(text, /Do not call assume_profile action=assume again for the active profile\./);
+  assert.match(text, /If the active profile is unclear, use assume_profile action=status\./);
+  assert.match(text, /Without an active profile, use plain bash unless the user or task requires an allowed \/assume profile\./);
   assert.match(text, /An ordinary AWS request does not by itself require an assumed profile/);
-  assert.match(text, /If the user requests existing environment credentials, use plain bash\. This path requires neither an AWS Assume policy nor an active \/assume profile/);
+  assert.match(text, /To select a required profile or switch profiles, use assume_profile action=assume\./);
+  assert.match(text, /Plain bash keeps the ambient AWS environment\. It does not receive the active profile's credentials\./);
+  assert.match(text, /Ambient AWS commands require neither an AWS Assume policy nor an active \/assume profile\./);
+  assert.doesNotMatch(text, /Select the profile with assume_profile before using aws_bash|when unclear, do not use them/);
   assert.match(text, /Missing AWS Assume setup disables only extension-managed profile access\. It does not prohibit ordinary AWS commands through plain bash/);
   assert.match(text, /Do not substitute identities for a required assumed profile\. If you cannot select or authenticate that profile, apply these rules:\n- Stop the task\.\n- Report the blocker\.\n- Do not silently substitute ambient credentials\.\n- Do not search credential stores\.\n- Do not invoke AWS\/Granted directly to obtain substitute credentials\./);
   assert.match(text, /Using ambient credentials is not a bypass when no assumed profile is required/);
@@ -106,7 +116,7 @@ function assertExecutionGuidance(text) {
 
 // Reproduce an in-process source upgrade, not just a new session with already-current imports.
 // The installed loader may keep native JS modules cached even after clearExtensionCache().
-for (const helper of ["policy", "session"]) {
+for (const helper of ["policy", "session", "session-region", "profiles", "credentials"]) {
   test(`mixed-version reload reports a restart requirement for a cached ${helper} helper`, {
     skip: !entry,
   }, async (t) => {
@@ -116,15 +126,24 @@ for (const helper of ["policy", "session"]) {
     cpSync(join(root, "src"), join(copy, "src"), { recursive: true });
     cpSync(join(root, "extensions"), join(copy, "extensions"), { recursive: true });
     writeFileSync(join(copy, "package.json"), '{"type":"module"}');
-    const path = join(copy, "src", `${helper}.js`);
+    const path = join(copy, "src", `${helper === "session-region" ? "session" : helper}.js`);
     const current = readFileSync(path, "utf8");
-    const previous = helper === "policy"
+    // A missing export in a cached helper reaches the extension as undefined, not as a load error.
+    const previous = helper === "profiles"
+      ? current.replace("export function discoverProfileRegionDetails(", "function discoverProfileRegionDetails(")
+      : helper === "credentials"
+      ? current.replace("export function resolveRegionDetails(", "function resolveRegionDetails(")
+      : helper === "policy"
       ? current.replace("export function loadPolicy(", "function loadCurrentPolicy(") + "\nexport function loadPolicy() { return []; }\n"
-      : current.replace("autoApproveRules: this.#autoApproveRules.map((rule) => ({ ...rule })), ", "");
+      : helper === "session-region"
+        ? current.replace(", regionSource: effective?.source ?? null", "")
+        : current.replace("autoApproveRules: this.#autoApproveRules.map((rule) => ({ ...rule })), ", "");
     assert.notEqual(previous, current);
     writeFileSync(path, previous);
     const warm = join(copy, "warm.ts");
-    writeFileSync(warm, helper === "policy"
+    writeFileSync(warm, helper === "profiles" || helper === "credentials"
+      ? `import * as helper from "./src/${helper}.js"; export default function(pi) { pi.registerCommand("warm", { handler() { return Object.keys(helper); } }); }`
+      : helper === "policy"
       ? `import { loadPolicy } from "./src/policy.js"; export default function(pi) { pi.registerCommand("warm", { handler() { return loadPolicy({}); } }); }`
       : `import { RoleSession } from "./src/session.js"; export default function(pi) { pi.registerCommand("warm", { handler() { return new RoleSession({ profiles: [] }).status(); } }); }`);
     const loader = await import(new URL("./core/extensions/loader.js", pathToFileURL(resolve(entry))));
@@ -132,7 +151,10 @@ for (const helper of ["policy", "session"]) {
     const warmed = await loader.loadExtensions([warm], copy, undefined, loader.createExtensionRuntime());
     assert.deepEqual(warmed.errors, []);
     const oldValue = await warmed.extensions[0].commands.get("warm").handler();
-    if (helper === "policy") assert.deepEqual(oldValue, []);
+    if (helper === "profiles") assert.ok(!oldValue.includes("discoverProfileRegionDetails"));
+    else if (helper === "credentials") assert.ok(!oldValue.includes("resolveRegionDetails"));
+    else if (helper === "policy") assert.deepEqual(oldValue, []);
+    else if (helper === "session-region") assert.equal(oldValue.regionSource, undefined);
     else assert.equal(oldValue.autoApproveRules, undefined);
     // Update the helper on disk and perform the same factory-cache reset as /reload.
     writeFileSync(path, current);
@@ -200,7 +222,7 @@ for (const [label, options] of [["missing", { writePolicy: false }], ["empty", {
     assert.match(status.guidance, /Pi extension tool\. It is not a shell command, function, or alias/);
     assert.match(status.guidance, /Do not probe for assume_profile with bash\/type\/which/);
     assert.match(env.tool("assume_profile").description, /Pi tool, not a shell command or alias/);
-    assert.match(env.tool("assume_profile").description, /Do not call assume_profile merely because a task mentions AWS/);
+    assert.match(env.tool("assume_profile").description, /An ordinary AWS request does not by itself require an assumed profile/);
     assert.ok(!JSON.stringify(status).includes("FAKE_SECRET"));
     assert.equal(env.tool("aws_bash").exposure, "hidden");
     assert.equal(env.tool("bash"), undefined);
@@ -228,6 +250,10 @@ for (const [label, options] of [["missing", { writePolicy: false }], ["empty", {
     assert.deepEqual(await env.emit("before_agent_start"), [undefined]);
     for (const action of ["list", "clear", "cancel"]) await assert.rejects(env.call(action), /no effective AWS Assume rules/);
     await assert.rejects(env.shell("echo must-not-run"), /no effective AWS Assume rules/);
+    for (const input of ["", "   "]) {
+      await env.ext.commands.get("assume").handler(input, env.ctx);
+      assert.equal(env.notices.at(-1), "No AWS profiles are enabled for this project. Configure .pi/aws-assume.json, then run /reload.");
+    }
     for (const action of ["status", "list", "clear", "some-profile"]) {
       await env.ext.commands.get("assume").handler(action, env.ctx);
       assert.match(env.notices.at(-1), /^assume: extension-managed profile access is unavailable\. This project has no effective AWS Assume rules/);
@@ -377,6 +403,68 @@ test("reminder is injected only when the active profile changes", { skip: !entry
   await env.emit("session_start", { reason: "reload" });
   assert.match(await reminder(), /profile is none/);
 });
+
+test("AWS tools and prompt guidelines share the same execution rules", { skip: !entry }, async (t) => {
+  const env = await setup(t);
+  const reminder = (await env.emit("before_agent_start"))[0].message.content;
+  for (const text of [env.tool("assume_profile").description, env.tool("aws_bash").description,
+    env.tool("aws_bash").promptGuidelines.join("\n")]) {
+    // These execution rules are also present in unavailable-state diagnostics.
+    const executionRules = reminder.split("\n\nMissing AWS Assume setup")[0].replace(/^AWS context: active \/assume profile is none\. /, "");
+    for (const rule of executionRules.split("\n\n")) assert.ok(text.includes(rule), rule);
+    assert.doesNotMatch(text, /Select the profile with assume_profile before using aws_bash|when unclear, do not use them/);
+  }
+});
+
+for (const args of ["use test-a", ""]) {
+  test(`user selection through ${args || "the picker"} permits direct AWS shell use`, { skip: !entry }, async (t) => {
+    const env = await setup(t);
+    await env.emit("before_agent_start");
+    await env.ext.commands.get("assume").handler(args, env.ctx);
+    assert.equal(env.prompts(), 0);
+    assert.equal(env.count(), 1);
+    const status = await env.metadata();
+    assert.equal(status.activeProfile, "test-a");
+    assert.deepEqual(status.approvedProfiles, ["test-a"]);
+    const reminder = (await env.emit("before_agent_start"))[0].message.content;
+    assert.match(reminder, /active \/assume profile is test-a/);
+    assertExecutionGuidance(reminder);
+    // No assistant assume action is needed between user selection and execution.
+    const command = `${JSON.stringify(process.execPath)} -e 'console.log(process.env.AWS_ACCESS_KEY_ID === "FAKE_ACCESS")'`;
+    for (let i = 0; i < 2; i++) assert.equal((await env.shell(command)).content[0].text.trim(), "true");
+    assert.equal(env.count(), 1, "direct execution must reuse the active credentials");
+    assert.equal(env.prompts(), 0, "direct execution must not request profile approval");
+    assert.deepEqual(await env.emit("before_agent_start"), [undefined]);
+    await env.call("clear");
+    assert.match((await env.emit("before_agent_start"))[0].message.content, /active \/assume profile is none/);
+    await assert.rejects(env.shell(command), /No AWS profile is active/);
+    assert.equal(env.count(), 1, "clear must not reactivate the profile");
+  });
+}
+
+for (const region of ["cn-north-1", "cn-northwest-1"]) {
+  test(`inline SSO ${region} reaches Granted, direct AWS shells, and command/tool status`, { skip: !entry }, async (t) => {
+    const env = await setup(t, { profiles: ["example/china/readonly"], configuredProfiles: ["example/china/readonly"] });
+    writeFileSync(env.configPath, `[profile example/china/readonly]\nsso_start_url=https://example.invalid/start\nsso_region=${region}\nsso_role_name=ReadOnly\n`);
+    process.env.AWS_REGION = "us-east-1";
+    process.env.AWS_DEFAULT_REGION = "us-east-1";
+    writeFileSync(join(env.cwd, "bin/granted"), `#!${process.execPath}\nif (process.env.AWS_REGION !== '${region}' || process.env.AWS_DEFAULT_REGION !== '${region}') process.exit(8);\nrequire('node:fs').appendFileSync(${JSON.stringify(env.log)}, 'fetch\\n');\nconsole.log(JSON.stringify({Version:1,AccessKeyId:'FAKE_ACCESS',SecretAccessKey:'FAKE_SECRET',SessionToken:'FAKE_TOKEN',Expiration:new Date(Date.now()+3600000).toISOString()}));\n`, { mode: 0o755 });
+    await env.ext.commands.get("assume").handler("use example/china/readonly", env.ctx);
+    const status = await env.metadata();
+    assert.equal(status.activeProfile, "example/china/readonly");
+    assert.equal(status.profileRegion, region);
+    assert.equal(status.profileRegionSource, "profile.sso_region");
+    assert.equal(status.region, region);
+    assert.equal(status.regionSource, "profile.sso_region");
+    await env.ext.commands.get("assume").handler("status", env.ctx);
+    assert.deepEqual(JSON.parse(env.notices.at(-1)), status);
+    const result = await env.shell(`${JSON.stringify(process.execPath)} -e 'console.log(JSON.stringify({region:process.env.AWS_REGION,defaultRegion:process.env.AWS_DEFAULT_REGION}))'`);
+    assert.deepEqual(JSON.parse(result.content[0].text), { region, defaultRegion: region });
+    assert.equal(env.count(), 1);
+    assert.equal(env.prompts(), 0);
+    assert.doesNotMatch(JSON.stringify(status), /FAKE_SECRET|FAKE_TOKEN|example.invalid/);
+  });
+}
 
 test("interactive Pi integration: approval, private credentials, shell environment, and all session reset reasons", {
   skip: !entry,
@@ -578,7 +666,9 @@ for (const [label, options, timeoutSeconds] of [
   const countdownValues = new Set();
   let renders = 0;
   // Exercise Pi's actual custom-screen installation, restoration, and disposal, not our UI mock.
-  const host = {
+  // Inherit InteractiveMode's helper methods: Pi 1.4.0 manages custom screens through a dialog stack
+  // (pushExtensionDialog/removeExtensionDialog), while older versions call editorContainer directly.
+  const host = Object.assign(Object.create(InteractiveMode.prototype), {
     editor, ui: { requestRender() {
       renders++;
       if (focused && focused !== editor) {
@@ -595,7 +685,9 @@ for (const [label, options, timeoutSeconds] of [
     }, setFocus(component) { focused = component; if (component !== editor) ready(); } },
     editorContainer: { clear() {}, addChild() {} },
     disposeActiveSelector() {}, keybindings: {},
-  };
+    // Dialog-stack state used by Pi 1.4.0 and newer; ignored by older versions.
+    extensionDialogs: [], programStatus: { setBlocked() {} },
+  });
   env.ctx.ui.custom = (factory) => InteractiveMode.prototype.showExtensionCustom.call(host, factory);
   // Advance virtual time rather than waiting for authentication deadlines.
   t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: Date.now() });

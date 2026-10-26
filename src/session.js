@@ -1,4 +1,4 @@
-import { AssumeError, shellEnvironment } from "./credentials.js";
+import { AssumeError, resolveRegionDetails, shellEnvironment } from "./credentials.js";
 import { isAllowedProfile, resolveAllowedProfiles } from "./policy.js";
 
 export const NO_ACTIVE_PROFILE = "No AWS profile is active, so aws_bash did not run. Select an allowed profile with assume_profile first, or use plain bash if no assumed profile is needed.";
@@ -14,6 +14,7 @@ export class RoleSession {
   #fetch;
   #region;
   #profileRegion;
+  #profileRegionSource;
   #now;
   #generation = 0;
   #revision = 0;
@@ -33,11 +34,15 @@ export class RoleSession {
     this.#now = now;
   }
 
-  status() {
+  // Region diagnostics describe the default command environment, before CLI or SDK overrides.
+  status(base = process.env) {
+    const effective = this.#active ? resolveRegionDetails(base, this.#profileRegion, this.#profileRegionSource) : undefined;
     return { profiles: [...this.#profiles], profilePatterns: [...this.#patterns],
       autoApproveRules: this.#autoApproveRules.map((rule) => ({ ...rule })), approvedProfiles: [...this.#approved],
       activeProfile: this.#active ?? null,
-      expiresAt: this.#credentials ? new Date(this.#credentials.expiresAt).toISOString() : null };
+      expiresAt: this.#credentials ? new Date(this.#credentials.expiresAt).toISOString() : null,
+      profileRegion: this.#profileRegion ?? null, profileRegionSource: this.#profileRegionSource ?? null,
+      region: effective?.region ?? null, regionSource: effective?.source ?? null };
   }
 
   revision() { return this.#revision; }
@@ -67,6 +72,7 @@ export class RoleSession {
     this.#active = undefined;
     this.#credentials = undefined;
     this.#profileRegion = undefined;
+    this.#profileRegionSource = undefined;
     if (approvals) this.#approved.clear();
     return this.status();
   }
@@ -103,7 +109,9 @@ export class RoleSession {
       try { profileRegion = this.#region?.(profile); } catch { profileRegion = undefined; }
       this.#credentials = credentials;
       this.#active = profile;
-      this.#profileRegion = profileRegion;
+      // Callers can supply a region string, or metadata that identifies the configured field.
+      this.#profileRegion = typeof profileRegion === "string" ? profileRegion : profileRegion?.region;
+      this.#profileRegionSource = typeof profileRegion === "string" ? "profile.region" : profileRegion?.source;
       this.#revision++;
       return this.status();
     }, signal);

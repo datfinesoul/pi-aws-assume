@@ -33,15 +33,32 @@ export const IDENTITY_KEYS = new Set([
 
 export const FALLBACK_REGION = "us-east-1";
 
-// Preserve inherited region precedence within a partition, but never let an ambient
-// China/non-China mismatch redirect a configured profile into the other partition.
-// A CLI --region or explicit SDK region still overrides the resulting environment.
-export function resolveRegion(base, profileRegion) {
+// Region-name prefixes of the AWS partitions outside the commercial "aws" partition.
+// Longer prefixes come first so "us-isob-" is not classified as "us-iso-".
+const PARTITION_PREFIXES = [
+  ["cn-", "aws-cn"], ["us-gov-", "aws-us-gov"], ["us-isob-", "aws-iso-b"], ["us-isof-", "aws-iso-f"],
+  ["us-iso-", "aws-iso"], ["eu-isoe-", "aws-iso-e"], ["eusc-", "aws-eusc"],
+];
+
+export function regionPartition(region) {
+  return PARTITION_PREFIXES.find(([prefix]) => region.startsWith(prefix))?.[1] ?? "aws";
+}
+
+// Preserve inherited region precedence within a partition, but never let an ambient region
+// from another partition (for example commercial vs. China or GovCloud) redirect a configured
+// profile. A CLI --region or explicit SDK region still overrides the resulting environment.
+export function resolveRegionDetails(base, profileRegion, profileSource = "profile.region") {
   const inherited = base.AWS_REGION || base.AWS_DEFAULT_REGION;
-  if (profileRegion && inherited && profileRegion.startsWith("cn-") !== inherited.startsWith("cn-")) {
-    return profileRegion;
+  if (profileRegion && inherited && regionPartition(profileRegion) !== regionPartition(inherited)) {
+    return { region: profileRegion, source: profileSource };
   }
-  return inherited || profileRegion || FALLBACK_REGION;
+  if (inherited) return { region: inherited, source: base.AWS_REGION ? "AWS_REGION" : "AWS_DEFAULT_REGION" };
+  if (profileRegion) return { region: profileRegion, source: profileSource };
+  return { region: FALLBACK_REGION, source: "default" };
+}
+
+export function resolveRegion(base, profileRegion) {
+  return resolveRegionDetails(base, profileRegion).region;
 }
 
 export function shellEnvironment(base, credentials, profileRegion) {
@@ -75,8 +92,9 @@ export function parseCredentials(text, now = Date.now()) {
     sessionToken: value.SessionToken, expiresAt });
 }
 
-function grantedEnvironment(base, profile) {
-  const env = shellEnvironment(base, undefined, discoverProfileRegion(profile, { env: base }));
+function grantedEnvironment(base, profile, cwd) {
+  // Resolve the profile region from the same config file and working directory as the session.
+  const env = shellEnvironment(base, undefined, discoverProfileRegion(profile, { env: base, cwd }));
   // The trusted credential resolver still needs the user's configured profile files/browser settings.
   for (const key of Object.keys(base)) {
     if (key === "AWS_CONFIG_FILE" || key === "AWS_SHARED_CREDENTIALS_FILE" || key.startsWith("GRANTED_")) env[key] = base[key];
@@ -85,7 +103,7 @@ function grantedEnvironment(base, profile) {
 }
 
 // No shell, no public output callbacks, and no raw stdout/stderr in errors or logs.
-export function fetchCredentials(executable, profile, { signal, env = process.env, timeoutMs = 60000 } = {}) {
+export function fetchCredentials(executable, profile, { signal, env = process.env, cwd = process.cwd(), timeoutMs = 60000 } = {}) {
   return new Promise((resolvePromise, reject) => {
     if (signal?.aborted) { reject(new AssumeError("Role operation cancelled.")); return; }
     const child = spawn(executable, ["credential-process", "--profile", profile, "--window", "5m", "--auto-login"], {
@@ -93,7 +111,8 @@ export function fetchCredentials(executable, profile, { signal, env = process.en
       // lets an open browser hold the pipe and delay the 'close' event long after Granted exits.
       // detached keeps Granted and the browser it launches out of Pi's process group, so terminal
       // signals aimed at Pi do not reach them. Only this pid is ever signalled, never the group.
-      env: grantedEnvironment(env, profile), stdio: ["ignore", "pipe", "ignore"], detached: process.platform !== "win32",
+      // Granted resolves a relative AWS_CONFIG_FILE against its cwd; keep it aligned with region discovery.
+      cwd, env: grantedEnvironment(env, profile, cwd), stdio: ["ignore", "pipe", "ignore"], detached: process.platform !== "win32",
     });
     let output = "";
     let bytes = 0;
