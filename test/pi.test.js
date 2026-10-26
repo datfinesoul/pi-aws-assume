@@ -116,7 +116,7 @@ function assertExecutionGuidance(text) {
 
 // Reproduce an in-process source upgrade, not just a new session with already-current imports.
 // The installed loader may keep native JS modules cached even after clearExtensionCache().
-for (const helper of ["policy", "session", "session-region"]) {
+for (const helper of ["policy", "session", "session-region", "profiles", "credentials"]) {
   test(`mixed-version reload reports a restart requirement for a cached ${helper} helper`, {
     skip: !entry,
   }, async (t) => {
@@ -128,7 +128,12 @@ for (const helper of ["policy", "session", "session-region"]) {
     writeFileSync(join(copy, "package.json"), '{"type":"module"}');
     const path = join(copy, "src", `${helper === "session-region" ? "session" : helper}.js`);
     const current = readFileSync(path, "utf8");
-    const previous = helper === "policy"
+    // A missing export in a cached helper reaches the extension as undefined, not as a load error.
+    const previous = helper === "profiles"
+      ? current.replace("export function discoverProfileRegionDetails(", "function discoverProfileRegionDetails(")
+      : helper === "credentials"
+      ? current.replace("export function resolveRegionDetails(", "function resolveRegionDetails(")
+      : helper === "policy"
       ? current.replace("export function loadPolicy(", "function loadCurrentPolicy(") + "\nexport function loadPolicy() { return []; }\n"
       : helper === "session-region"
         ? current.replace(", regionSource: effective?.source ?? null", "")
@@ -136,7 +141,9 @@ for (const helper of ["policy", "session", "session-region"]) {
     assert.notEqual(previous, current);
     writeFileSync(path, previous);
     const warm = join(copy, "warm.ts");
-    writeFileSync(warm, helper === "policy"
+    writeFileSync(warm, helper === "profiles" || helper === "credentials"
+      ? `import * as helper from "./src/${helper}.js"; export default function(pi) { pi.registerCommand("warm", { handler() { return Object.keys(helper); } }); }`
+      : helper === "policy"
       ? `import { loadPolicy } from "./src/policy.js"; export default function(pi) { pi.registerCommand("warm", { handler() { return loadPolicy({}); } }); }`
       : `import { RoleSession } from "./src/session.js"; export default function(pi) { pi.registerCommand("warm", { handler() { return new RoleSession({ profiles: [] }).status(); } }); }`);
     const loader = await import(new URL("./core/extensions/loader.js", pathToFileURL(resolve(entry))));
@@ -144,7 +151,9 @@ for (const helper of ["policy", "session", "session-region"]) {
     const warmed = await loader.loadExtensions([warm], copy, undefined, loader.createExtensionRuntime());
     assert.deepEqual(warmed.errors, []);
     const oldValue = await warmed.extensions[0].commands.get("warm").handler();
-    if (helper === "policy") assert.deepEqual(oldValue, []);
+    if (helper === "profiles") assert.ok(!oldValue.includes("discoverProfileRegionDetails"));
+    else if (helper === "credentials") assert.ok(!oldValue.includes("resolveRegionDetails"));
+    else if (helper === "policy") assert.deepEqual(oldValue, []);
     else if (helper === "session-region") assert.equal(oldValue.regionSource, undefined);
     else assert.equal(oldValue.autoApproveRules, undefined);
     // Update the helper on disk and perform the same factory-cache reset as /reload.
@@ -653,7 +662,9 @@ for (const [label, options, timeoutSeconds] of [
   const countdownValues = new Set();
   let renders = 0;
   // Exercise Pi's actual custom-screen installation, restoration, and disposal, not our UI mock.
-  const host = {
+  // Inherit InteractiveMode's helper methods: Pi 1.4.0 manages custom screens through a dialog stack
+  // (pushExtensionDialog/removeExtensionDialog), while older versions call editorContainer directly.
+  const host = Object.assign(Object.create(InteractiveMode.prototype), {
     editor, ui: { requestRender() {
       renders++;
       if (focused && focused !== editor) {
@@ -670,7 +681,9 @@ for (const [label, options, timeoutSeconds] of [
     }, setFocus(component) { focused = component; if (component !== editor) ready(); } },
     editorContainer: { clear() {}, addChild() {} },
     disposeActiveSelector() {}, keybindings: {},
-  };
+    // Dialog-stack state used by Pi 1.4.0 and newer; ignored by older versions.
+    extensionDialogs: [], programStatus: { setBlocked() {} },
+  });
   env.ctx.ui.custom = (factory) => InteractiveMode.prototype.showExtensionCustom.call(host, factory);
   // Advance virtual time rather than waiting for authentication deadlines.
   t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: Date.now() });

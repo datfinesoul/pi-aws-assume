@@ -277,7 +277,7 @@ export default function assumeExtension(pi: ExtensionAPI) {
         loader.onAbort = () => controller.abort();
         if (signal.aborted) onAbort();
         if (!finished) {
-          void fetchCredentials(executable, profile, { signal, timeoutMs })
+          void fetchCredentials(executable, profile, { signal, cwd: ctx.cwd, timeoutMs })
             .then((credentials) => finish({ credentials }), (error) => finish({ error }));
         }
         return loader;

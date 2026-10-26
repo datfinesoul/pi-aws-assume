@@ -293,7 +293,7 @@ Concrete profile names must start with an ASCII letter or digit. They can contai
 - **Project-controlled access.** A trusted project must define or select rules in `.pi/aws-assume.json`. Global installation alone grants no access through the extension.
 - **Separate credential scope.** Only `aws_bash` receives selected temporary credentials. The extension first removes inherited AWS identity variables from that tool's environment. Plain `bash` retains ambient credentials and access to other host credential sources.
 - **Awareness without authorization.** Status diagnostics and a model-facing context reminder remain available when role access is disabled. If a task requires an assumed profile but setup or authentication is unavailable, the assistant must stop and report the blocker. It must not substitute ambient credentials, search credential stores, obtain credentials directly through AWS/Granted, or edit AWS policy/profile files. The user manages setup outside Pi, then runs `/reload`. Tasks that do not require an assumed profile can still use plain `bash` with its ambient environment. This guidance is not technical enforcement.
-- **Region selection.** The selected profile's explicit `region` defines its operational default. If `region` is absent, the extension uses `sso_region` from that profile section. Granted's subprocess and `aws_bash` use inherited `AWS_REGION`, then inherited `AWS_DEFAULT_REGION`, then this profile default, then `us-east-1`. If inherited and profile regions cross the China/non-China partition boundary, the profile default wins. This also applies to the `sso_region` fallback. Precedence within a partition is unchanged. A CLI `--region` or explicit SDK region still wins.
+- **Region selection.** The selected profile's explicit `region` defines its operational default. If `region` is absent, the extension uses `sso_region` from that profile section. Granted's subprocess and `aws_bash` use inherited `AWS_REGION`, then inherited `AWS_DEFAULT_REGION`, then this profile default, then `us-east-1`. If the inherited region and the profile default are in different AWS partitions, the profile default wins. The extension identifies the partition from the region name prefix: `cn-` (China), `us-gov-` (GovCloud), `us-iso-`, `us-isob-`, `us-isof-`, and `eu-isoe-` (isolated regions), and `eusc-` (European Sovereign Cloud). All other regions are in the commercial partition. This rule also applies to the `sso_region` fallback. Precedence within a partition is unchanged. GovCloud and isolated-region support is untested with real accounts. A CLI `--region` or explicit SDK region still wins.
 - **Memory-only state.** The extension never persists credentials or approvals. It never automatically reactivates a role. Granted's own cache is separate.
 - **macOS/Linux, Granted, interactive mode.** This alpha does not support other platforms, credential tools, or non-interactive modes for role access.
 - **Not a sandbox.** See [Known limitations](#known-limitations).
@@ -359,7 +359,7 @@ Each `aws_bash` command receives a fresh environment copy. The extension removes
 - Custom AWS config and credential path variables.
 - `GRANTED_*` session variables.
 
-Operational `AWS_REGION` and `AWS_DEFAULT_REGION` follow the [region order](#assumptions-and-design-choices). At selection, the extension retains only the profile's region default and its source. It checks `region` first, then inline `sso_region`. It does not inherit `sso_region` from a separate `[sso-session ...]` section. Region discovery remains best effort. Missing or unreadable configuration supplies no profile default.
+Operational `AWS_REGION` and `AWS_DEFAULT_REGION` follow the [region order](#assumptions-and-design-choices). At selection, the extension retains only the profile's region default and its source. It checks `region` first, then inline `sso_region`. It does not inherit `sso_region` from a separate `[sso-session ...]` section. Region discovery remains best effort. Missing or unreadable configuration supplies no profile default. A relative `AWS_CONFIG_FILE` path resolves from Pi's working directory. Granted also runs in that directory, so it reads the same file.
 
 Granted still uses the configured SSO authentication region for sign-in. The desired resource region can differ. Set an explicit operational `region`, CLI `--region`, or SDK region when the SSO fallback is not appropriate.
 
@@ -393,7 +393,7 @@ pnpm test
 pnpm run pack:check
 ```
 
-After editing `src/*.js`, fully restart Pi to load the new helpers. `/reload` can refresh the TypeScript entry point but retain native JavaScript imports. AWS Assume detects incompatible cached policy/session helpers. It then disables role access and sends a restart notice. Configuration-only changes still use `/reload`.
+After editing `src/*.js`, fully restart Pi to load the new helpers. `/reload` can refresh the TypeScript entry point but retain native JavaScript imports. AWS Assume detects incompatible cached policy, session, profile, and credential helpers. It then disables role access and sends a restart notice. Configuration-only changes still use `/reload`.
 
 For an installed-Pi loader/command/tool smoke test, set `PI_CODING_AGENT_ENTRY` to the installed package's `dist/index.js`:
 

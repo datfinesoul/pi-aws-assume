@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { parsePolicyFile, loadPolicy, matchesProfilePattern, resolveAllowedProfiles } from "../src/policy.js";
 import { discoverProfileNames, discoverProfileRegion, discoverProfileRegionDetails, parseProfileNames, parseProfileRegion, parseProfileRegionDetails } from "../src/profiles.js";
-import { AssumeError, fetchCredentials, findGranted, parseCredentials, resolveRegionDetails, safeMessage, shellEnvironment } from "../src/credentials.js";
+import { AssumeError, fetchCredentials, findGranted, parseCredentials, regionPartition, resolveRegionDetails, safeMessage, shellEnvironment } from "../src/credentials.js";
 import { createGuards } from "../src/guards.js";
 import { RoleSession } from "../src/session.js";
 import { checkPiVersion, isUsableVersion, parseVersion } from "../src/version.js";
@@ -282,6 +282,33 @@ for (const region of ["cn-north-1", "cn-northwest-1"]) for (const field of ["reg
     assert.equal(shellEnvironment({ AWS_REGION: region }, credentials(), "cn-north-1").AWS_REGION, region);
   });
 }
+test("regions are classified into AWS partitions by name prefix", () => {
+  for (const [region, partition] of [
+    ["us-east-1", "aws"], ["eu-west-1", "aws"], ["cn-north-1", "aws-cn"], ["us-gov-west-1", "aws-us-gov"],
+    ["us-gov-east-1", "aws-us-gov"], ["us-iso-east-1", "aws-iso"], ["us-isob-east-1", "aws-iso-b"],
+    ["us-isof-south-1", "aws-iso-f"], ["eu-isoe-west-1", "aws-iso-e"], ["eusc-de-east-1", "aws-eusc"],
+  ]) assert.equal(regionPartition(region), partition, region);
+});
+for (const profileRegion of ["us-gov-west-1", "us-iso-east-1", "us-isob-east-1"]) {
+  test(`an inherited region from another partition does not redirect a ${profileRegion} profile`, () => {
+    for (const ambient of [{ AWS_REGION: "us-east-1" }, { AWS_DEFAULT_REGION: "cn-north-1" }]) {
+      assert.deepEqual(resolveRegionDetails(ambient, profileRegion), { region: profileRegion, source: "profile.region" });
+    }
+    // Precedence within the same partition is unchanged.
+    const sibling = profileRegion.replace(/-\d+$/, "-2");
+    assert.deepEqual(resolveRegionDetails({ AWS_REGION: sibling }, profileRegion), { region: sibling, source: "AWS_REGION" });
+    // GovCloud and commercial regions both start with "us-", so the commercial profile must also win.
+    assert.deepEqual(resolveRegionDetails({ AWS_REGION: profileRegion }, "us-west-2"), { region: "us-west-2", source: "profile.region" });
+  });
+}
+test("Granted runs in the session cwd and reads a relative AWS_CONFIG_FILE from it", async (t) => {
+  const dir = temporary(t);
+  mkdirSync(join(dir, "project"));
+  writeFileSync(join(dir, "project", "config"), "[profile gov]\nregion=us-gov-west-1\n");
+  const executable = join(dir, "granted");
+  writeFileSync(executable, `#!${process.execPath}\nif (process.cwd() !== ${JSON.stringify(realpathSync(join(dir, "project")))} || process.env.AWS_REGION !== 'us-gov-west-1' || process.env.AWS_CONFIG_FILE !== 'config') process.exit(8);\nconsole.log(JSON.stringify(${JSON.stringify(wire())}));\n`, { mode: 0o755 });
+  await fetchCredentials(executable, "gov", { env: { AWS_CONFIG_FILE: "config", AWS_REGION: "us-east-1" }, cwd: join(dir, "project") });
+});
 test("region diagnostics identify inherited, configured, SSO fallback, and default sources", () => {
   assert.deepEqual(resolveRegionDetails({ AWS_REGION: "eu-west-1", AWS_DEFAULT_REGION: "us-west-2" }, "cn-north-1", "profile.sso_region"),
     { region: "cn-north-1", source: "profile.sso_region" });
