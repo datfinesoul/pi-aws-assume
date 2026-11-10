@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, loadPolicy, parsePolicyFile } from "../src/policy.js";
-import { createGuards } from "../src/guards.js";
+import { DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, loadPolicy, parsePolicyFile } from "../src/policy.ts";
+import { createGuards } from "../src/guards.ts";
 
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), "aws-policy-test-"));

@@ -1,7 +1,7 @@
 import { closeSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { isProfileName } from "./policy.js";
+import { isProfileName } from "./policy.ts";
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_NAMES = 10000;

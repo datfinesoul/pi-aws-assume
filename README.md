@@ -383,7 +383,7 @@ Use OS isolation or protected credential handling later if stronger guarantees b
 
 ## Development
 
-The package requires no build step or runtime npm dependencies beyond Pi. [Granted](https://github.com/fwdcloudsec/granted) is an external runtime requirement. Pure helpers reside in `src/*.js`. Pi wiring resides in `extensions/aws-assume/index.ts`. Tests use Node's built-in runner.
+The package requires no build step or runtime npm dependencies beyond Pi. [Granted](https://github.com/fwdcloudsec/granted) is an external runtime requirement. Pure helpers reside in `src/*.ts`. Pi wiring resides in `extensions/aws-assume/index.ts`. Tests use Node's built-in runner.
 
 ```bash
 npm test
@@ -393,7 +393,7 @@ pnpm test
 pnpm run pack:check
 ```
 
-After editing `src/*.js`, fully restart Pi to load the new helpers. `/reload` can refresh the TypeScript entry point but retain native JavaScript imports. AWS Assume detects incompatible cached policy, session, profile, and credential helpers. It then disables role access and sends a restart notice. Configuration-only changes still use `/reload`.
+After editing `src/*.ts`, run `/reload` to load the new helpers. TypeScript helpers avoid the stale native JavaScript imports that previously required a full restart. Node.js imports these helpers directly in unit tests. Same-process integration tests check helper upgrades without authentication or role activation. Defensive compatibility checks still disable role access if helpers have incompatible interfaces.
 
 For an installed-Pi loader/command/tool smoke test, set `PI_CODING_AGENT_ENTRY` to the installed package's `dist/index.js`:
 
@@ -405,7 +405,7 @@ Without this variable, installed-Pi tests are skipped. Interactive integration t
 
 Authentication tests use fake Granted executables and credentials in temporary directories. They make no model requests and use no real AWS credentials or role assumptions. Live Granted authentication remains a user-run smoke test. The prototype used Granted 0.38.0 during development.
 
-Every pull request that triggers CI must bump `version` in `package.json` and move the `Unreleased` changelog entries under a matching `## [<version>] - <date>` heading; CI fails otherwise. Pull requests that change only Markdown skipped by CI are exempt. After the merge to `main` passes CI, the Release workflow tags that commit `v<version>`. Merges that do not change the version are not tagged.
+Each feature branch that triggers CI gets one version update relative to its base. Keep that version unchanged throughout the branch. Record subsequent user-visible changes under the same matching `## [<version>] - <date>` changelog heading. Do not increment the patch version for each edit, fix, or conversation turn. CI requires the branch version to exceed its base version. Pull requests that change only Markdown skipped by CI are exempt. After merge and successful CI, the Release workflow tags the tested commit `v<version>`. Merges that do not change the version are not tagged.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull-request guidance.
 

@@ -1,7 +1,7 @@
 import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import { delimiter, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { discoverProfileRegion } from "./profiles.js";
+import { discoverProfileRegion } from "./profiles.ts";
 
 export class AssumeError extends Error {
   constructor(message) { super(message); this.name = "AssumeError"; }

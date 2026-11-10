@@ -115,9 +115,9 @@ function assertExecutionGuidance(text) {
 }
 
 // Reproduce an in-process source upgrade, not just a new session with already-current imports.
-// The installed loader may keep native JS modules cached even after clearExtensionCache().
+// TypeScript helpers must refresh after clearExtensionCache() in the same process.
 for (const helper of ["policy", "session", "session-region", "profiles", "credentials"]) {
-  test(`mixed-version reload reports a restart requirement for a cached ${helper} helper`, {
+  test(`same-process reload refreshes an outdated ${helper} helper without a restart`, {
     skip: !entry,
   }, async (t) => {
     const copy = mkdtempSync(join(tmpdir(), "pi-assume-reload-"));
@@ -126,7 +126,7 @@ for (const helper of ["policy", "session", "session-region", "profiles", "creden
     cpSync(join(root, "src"), join(copy, "src"), { recursive: true });
     cpSync(join(root, "extensions"), join(copy, "extensions"), { recursive: true });
     writeFileSync(join(copy, "package.json"), '{"type":"module"}');
-    const path = join(copy, "src", `${helper === "session-region" ? "session" : helper}.js`);
+    const path = join(copy, "src", `${helper === "session-region" ? "session" : helper}.ts`);
     const current = readFileSync(path, "utf8");
     // A missing export in a cached helper reaches the extension as undefined, not as a load error.
     const previous = helper === "profiles"
@@ -142,10 +142,10 @@ for (const helper of ["policy", "session", "session-region", "profiles", "creden
     writeFileSync(path, previous);
     const warm = join(copy, "warm.ts");
     writeFileSync(warm, helper === "profiles" || helper === "credentials"
-      ? `import * as helper from "./src/${helper}.js"; export default function(pi) { pi.registerCommand("warm", { handler() { return Object.keys(helper); } }); }`
+      ? `import * as helper from "./src/${helper}.ts"; export default function(pi) { pi.registerCommand("warm", { handler() { return Object.keys(helper); } }); }`
       : helper === "policy"
-      ? `import { loadPolicy } from "./src/policy.js"; export default function(pi) { pi.registerCommand("warm", { handler() { return loadPolicy({}); } }); }`
-      : `import { RoleSession } from "./src/session.js"; export default function(pi) { pi.registerCommand("warm", { handler() { return new RoleSession({ profiles: [] }).status(); } }); }`);
+      ? `import { loadPolicy } from "./src/policy.ts"; export default function(pi) { pi.registerCommand("warm", { handler() { return loadPolicy({}); } }); }`
+      : `import { RoleSession } from "./src/session.ts"; export default function(pi) { pi.registerCommand("warm", { handler() { return new RoleSession({ profiles: [] }).status(); } }); }`);
     const loader = await import(new URL("./core/extensions/loader.js", pathToFileURL(resolve(entry))));
     loader.clearExtensionCache();
     const warmed = await loader.loadExtensions([warm], copy, undefined, loader.createExtensionRuntime());
@@ -161,15 +161,15 @@ for (const helper of ["policy", "session", "session-region", "profiles", "creden
     loader.clearExtensionCache();
     const env = await setup(t, { extensionPath: join(copy, "extensions/aws-assume/index.ts") });
     const status = await env.metadata();
-    assert.equal(status.available, false);
-    assert.match(status.reason, /Fully exit and restart Pi/);
-    assert.match(status.reason, /\/reload cannot refresh these cached helpers/);
-    assert.doesNotMatch(status.reason, /project is not trusted|reading 'map'/);
-    assert.equal(env.tool("aws_bash").exposure, "hidden");
-    assert.equal(env.count(), 0);
-    assert.ok(env.notices.some((text) => /restart Pi/.test(text)));
-    await assert.rejects(env.call("assume", "test-a"), /restart Pi/);
-    assert.match((await env.emit("before_agent_start"))[0].message.content, /restart Pi/);
+    assert.notEqual(status.available, false);
+    assert.deepEqual(status.profiles, ["test-a", "test-b"]);
+    assert.equal(status.activeProfile, null);
+    assert.deepEqual(status.approvedProfiles, []);
+    assert.doesNotMatch(status.reason ?? "", /restart Pi|project is not trusted|reading 'map'/);
+    assert.equal(env.tool("aws_bash").exposure, "model-only");
+    assert.equal(env.count(), 0, "Reload must not authenticate or assume a role");
+    assert.ok(!env.notices.some((text) => /restart Pi/.test(text)));
+    assertExecutionGuidance((await env.emit("before_agent_start"))[0].message.content);
   });
 }
 
@@ -735,7 +735,7 @@ test("AWS row right-aligns local-time expiry and stays within narrow terminal wi
   // Explicit user selection succeeds even after an assistant approval was declined.
   await env.ext.commands.get("assume").handler("use test-a", env.ctx);
   const metadata = await env.metadata();
-  const { formatLocalExpiration } = await import("../src/status.js");
+  const { formatLocalExpiration } = await import("../src/status.ts");
   const expected = `Expires ${formatLocalExpiration(metadata.expiresAt)}`;
   const line = row().render(120)[0];
   assert.ok(line.startsWith("AWS: test-a"));

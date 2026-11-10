@@ -7,13 +7,13 @@ import { BorderedLoader, createBashToolDefinition, createLocalBashOperations } f
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { AssumeError, fetchCredentials, findGranted, resolveRegionDetails, safeMessage } from "../../src/credentials.js";
-import { createGuards } from "../../src/guards.js";
-import { hasGlobPatterns, loadPolicy } from "../../src/policy.js";
-import { discoverProfileNames, discoverProfileRegionDetails } from "../../src/profiles.js";
-import { RoleSession } from "../../src/session.js";
-import { formatLocalExpiration } from "../../src/status.js";
-import { checkPiVersion, isUsableVersion } from "../../src/version.js";
+import { AssumeError, fetchCredentials, findGranted, resolveRegionDetails, safeMessage } from "../../src/credentials.ts";
+import { createGuards } from "../../src/guards.ts";
+import { hasGlobPatterns, loadPolicy } from "../../src/policy.ts";
+import { discoverProfileNames, discoverProfileRegionDetails } from "../../src/profiles.ts";
+import { RoleSession } from "../../src/session.ts";
+import { formatLocalExpiration } from "../../src/status.ts";
+import { checkPiVersion, isUsableVersion } from "../../src/version.ts";
 
 const AWS_BASH = "aws_bash";
 // Reasons are plain sentences shared by user notices and model-facing output.

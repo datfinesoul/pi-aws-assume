@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatLocalExpiration } from "../src/status.js";
+import { formatLocalExpiration } from "../src/status.ts";
 
 test("expiration uses local time, minute precision, and compact numeric UTC offsets", () => {
   const previous = process.env.TZ;
