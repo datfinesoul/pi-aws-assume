@@ -4,12 +4,12 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { parsePolicyFile, loadPolicy, matchesProfilePattern, resolveAllowedProfiles } from "../src/policy.js";
-import { discoverProfileNames, discoverProfileRegion, discoverProfileRegionDetails, parseProfileNames, parseProfileRegion, parseProfileRegionDetails } from "../src/profiles.js";
-import { AssumeError, fetchCredentials, findGranted, parseCredentials, regionPartition, resolveRegionDetails, safeMessage, shellEnvironment } from "../src/credentials.js";
-import { createGuards } from "../src/guards.js";
-import { RoleSession } from "../src/session.js";
-import { checkPiVersion, isUsableVersion, parseVersion } from "../src/version.js";
+import { parsePolicyFile, loadPolicy, matchesProfilePattern, resolveAllowedProfiles } from "../src/policy.ts";
+import { discoverProfileNames, discoverProfileRegion, discoverProfileRegionDetails, parseProfileNames, parseProfileRegion, parseProfileRegionDetails } from "../src/profiles.ts";
+import { AssumeError, fetchCredentials, findGranted, parseCredentials, regionPartition, resolveRegionDetails, safeMessage, shellEnvironment } from "../src/credentials.ts";
+import { createGuards } from "../src/guards.ts";
+import { RoleSession } from "../src/session.ts";
+import { checkPiVersion, isUsableVersion, parseVersion } from "../src/version.ts";
 
 const now = 1700000000000;
 const credentials = (expiresAt = now + 3600000) => ({ accessKeyId: "FAKE_ACCESS", secretAccessKey: "FAKE_SECRET", sessionToken: "FAKE_TOKEN", expiresAt });

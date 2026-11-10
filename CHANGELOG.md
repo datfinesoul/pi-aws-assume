@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-10
+
+### Fixed
+
+- Use TypeScript runtime helpers so `/reload` refreshes imported logic instead of retaining cached JavaScript helpers.
+- Verify same-process upgrades of policy, session, profile, and credential helpers without authentication or role activation.
+
 ## [0.4.0] - 2026-10-26
 
 ### Added

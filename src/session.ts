@@ -1,5 +1,5 @@
-import { AssumeError, resolveRegionDetails, shellEnvironment } from "./credentials.js";
-import { isAllowedProfile, resolveAllowedProfiles } from "./policy.js";
+import { AssumeError, resolveRegionDetails, shellEnvironment } from "./credentials.ts";
+import { isAllowedProfile, resolveAllowedProfiles } from "./policy.ts";
 
 export const NO_ACTIVE_PROFILE = "No AWS profile is active, so aws_bash did not run. Select an allowed profile with assume_profile first, or use plain bash if no assumed profile is needed.";
 
