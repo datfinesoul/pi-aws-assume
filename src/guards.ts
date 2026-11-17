@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { normalizeEnvironment } from "./environment.ts";
 
 const POLICY_FILE = "aws-assume.json";
 // Protected files are user-edited only. Guide the assistant to hand the change to the user instead of a bare refusal.
@@ -20,7 +21,10 @@ function canonical(path) {
 
 // policyOnly protects just the policy files from built-in writes/edits; credential stores are left alone.
 export function createGuards({ cwd, home, policyPath, additionalPolicyPaths = [], env = process.env, policyOnly = false }) {
-  const expand = (path) => resolve(cwd, path === "~" ? home : path.startsWith("~/") ? join(home, path.slice(2)) : path);
+  env = normalizeEnvironment(env);
+  const windows = process.platform === "win32";
+  const pathKey = (path) => windows ? path.replace(/\\/g, "/").toLowerCase() : path;
+  const expand = (path) => resolve(cwd, path === "~" ? home : /^~[/\\]/.test(path) ? join(home, path.slice(2)) : path);
   const stores = policyOnly ? [] : [join(home, ".aws"), join(home, ".granted"),
     env.AWS_CONFIG_FILE, env.AWS_SHARED_CREDENTIALS_FILE].filter(Boolean).map(expand);
   const policies = [policyPath, ...additionalPolicyPaths].filter(Boolean).map(expand);
@@ -31,7 +35,7 @@ export function createGuards({ cwd, home, policyPath, additionalPolicyPaths = []
     return rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel) ? [path, `~/${rel}`, `$HOME/${rel}`, `\${HOME}/${rel}`] : [path];
   });
   const within = (path, root) => {
-    const rel = relative(root, path);
+    const rel = relative(pathKey(root), pathKey(path));
     return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
   };
   const matches = (path, roots) => roots.some((root) => within(path, root) || within(canonical(path), canonical(root)));
@@ -50,24 +54,25 @@ export function createGuards({ cwd, home, policyPath, additionalPolicyPaths = []
   // Applied only to the AWS shell tool, never to plain bash. Intentionally conservative checks
   // for common bypasses, NOT a shell parser or sandbox.
   function shell(command) {
+    command = pathKey(command);
     // Granted/assume as a command word (start of a command or after ; & | ( or $( ), optionally
     // quoted, path-qualified, or behind a common command wrapper.
-    if (/(?:^|[;&|(\n`]|\$\()\s*(?:(?:exec|env|command|sudo|nohup|time|xargs)\s+)*["']?(?:[^\s;&|()'"]*\/)?(?:assume|assumego|granted)(?=[\s;)&|'"`]|$)/m.test(command)) {
+    if (/(?:^|[;&|(\n`]|\$\()\s*(?:(?:exec|env|command|sudo|nohup|time|xargs)\s+)*["']?(?:[^\s;&|()'"]*\/)?(?:assume|assumego|granted)(?:\.exe)?(?=[\s;)&|'"`]|$)/mi.test(command)) {
       return "assume: run profile selection/authentication through assume_profile, not Granted shell commands.";
     }
-    if (/(?:^|[\s;&|(/])aws\s+(?:configure\b|sso\s+(?:login|logout)\b)/m.test(command)) {
+    if (/(?:^|[\s;&|(/])aws(?:\.exe)?\s+(?:configure\b|sso\s+(?:login|logout)\b)/m.test(command)) {
       return "assume: AWS profile configuration/direct SSO commands are blocked. Manage configuration outside Pi; authenticate through assume_profile.";
     }
-    if (/(?:^|\s)--profile(?:[=\s]|$)|\bAWS_(?:DEFAULT_)?PROFILE\s*=/.test(command)) {
+    if (/(?:^|\s)--profile(?:[=\s]|$)|\bAWS_(?:DEFAULT_)?PROFILE\s*=/i.test(command)) {
       return "assume: aws_bash uses the selected profile; omit --profile and AWS_PROFILE. Select another profile through assume_profile.";
     }
     // Match .aws/.granted only as a whole path segment, not names such as .aws-sdk.
     // The policy file name is blocked in any form, so relative, ~/, $HOME, and
     // $PI_CODING_AGENT_DIR references to project or global policy are all covered.
     if (/(?:~\/|\$HOME\/|\$\{HOME\}\/|\/)\.(?:aws|granted)(?=[/\s'";|&)]|$)/m.test(command) ||
-        sensitive.some((path) => command.includes(path)) || command.includes(POLICY_FILE) ||
-        /\bAWS_(?:CONFIG_FILE|SHARED_CREDENTIALS_FILE)\s*=/.test(command)) {
-      if (command.includes(POLICY_FILE) || policies.some((path) => command.includes(path))) {
+        sensitive.some((path) => command.includes(pathKey(path))) || command.includes(POLICY_FILE) ||
+        /\bAWS_(?:CONFIG_FILE|SHARED_CREDENTIALS_FILE)\s*=/i.test(command)) {
+      if (command.includes(POLICY_FILE) || policies.some((path) => command.includes(pathKey(path)))) {
         return "assume: aws_bash cannot access AWS Assume policy files. To inspect a policy, use the read tool. " +
           `To change one, ${USER_EDIT.replace("<file>", policies.join(" or ") || POLICY_FILE)} Name only the file that applies.`;
       }

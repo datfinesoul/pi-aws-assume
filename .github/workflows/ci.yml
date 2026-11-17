@@ -49,6 +49,34 @@ jobs:
       - name: Validate package contents
         run: ${{ matrix.package-manager }} run pack:check
 
+  windows:
+    name: Windows native process and credential safety (Node.js ${{ matrix.node-version }})
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - "22.19"
+          - "24"
+          - "26"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install Pi for Git Bash integration
+        shell: pwsh
+        run: |
+          npm install --prefix "$env:RUNNER_TEMP/pi-host" --ignore-scripts @earendil-works/pi-coding-agent@1.5.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "PI_CODING_AGENT_ENTRY=$env:RUNNER_TEMP/pi-host/node_modules/@earendil-works/pi-coding-agent/dist/index.js" >> $env:GITHUB_ENV
+      - name: Run portable Windows regression tests
+        run: node --test test/windows.test.js
+      - name: Validate package contents
+        run: npm pack --dry-run
+
   version:
     name: Version bump
     # CI's path filters already skip pull requests that change only passive Markdown.

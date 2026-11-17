@@ -2,6 +2,7 @@ import { closeSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { isProfileName } from "./policy.ts";
+import { normalizeEnvironment } from "./environment.ts";
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_NAMES = 10000;
@@ -50,6 +51,7 @@ function readNames(path, kind) {
 }
 
 function configPath({ env, home, cwd }) {
+  env = normalizeEnvironment(env);
   return resolve(cwd, env.AWS_CONFIG_FILE || join(home, ".aws", "config"));
 }
 
@@ -97,6 +99,7 @@ export function discoverProfileRegion(profile, options) {
 }
 
 export function discoverProfileNames({ env = process.env, home = homedir(), cwd = process.cwd() } = {}) {
+  env = normalizeEnvironment(env);
   const credentials = env.AWS_SHARED_CREDENTIALS_FILE || join(home, ".aws", "credentials");
   const names = new Set([
     ...readNames(configPath({ env, home, cwd }), "config"),
