@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-17
+
+### Added
+
+- Enable extension-managed profiles on Windows 11 with native Granted and Git Bash through Pi's existing Bash runner. Real Windows browser authentication still needs user testing.
+- Add Windows CI checks for native executable discovery, credential subprocesses, cancellation, environment sanitization, and path guards. Tests use fake credentials without AWS authentication.
+
+### Security
+
+- Normalize Windows environment-variable names before credential sanitization, region selection, and profile discovery. Remove mixed-case identity aliases before injecting temporary credentials.
+- Recognize Windows executable suffixes and common Windows path spellings in the best-effort AWS shell guards.
+
 ## [0.4.1] - 2026-11-10
 
 ### Fixed

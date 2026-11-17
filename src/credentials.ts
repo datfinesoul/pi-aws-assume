@@ -2,6 +2,7 @@ import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import { delimiter, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { discoverProfileRegion } from "./profiles.ts";
+import { normalizeEnvironment } from "./environment.ts";
 
 export class AssumeError extends Error {
   constructor(message) { super(message); this.name = "AssumeError"; }
@@ -11,11 +12,13 @@ export function safeMessage(error) {
   return error instanceof AssumeError ? error.message : "Role operation failed; diagnostic output was withheld to protect credentials.";
 }
 
-export function findGranted(env = process.env) {
-  for (const directory of (env.PATH ?? "").split(delimiter).filter(Boolean)) {
-    const candidate = resolve(directory, "granted");
+export function findGranted(env = process.env, platform = process.platform) {
+  env = normalizeEnvironment(env, platform);
+  for (const directory of (env.PATH ?? "").split(platform === "win32" ? ";" : delimiter).filter(Boolean)) {
+    // Native .exe only on Windows: never invoke .cmd/.bat wrappers through a shell.
+    const candidate = resolve(directory.replace(/^"(.*)"$/, "$1"), platform === "win32" ? "granted.exe" : "granted");
     try {
-      accessSync(candidate, constants.X_OK);
+      accessSync(candidate, platform === "win32" ? constants.F_OK : constants.X_OK);
       if (statSync(candidate).isFile()) return realpathSync(candidate);
     } catch { /* Try the next PATH entry without executing anything. */ }
   }
@@ -48,6 +51,7 @@ export function regionPartition(region) {
 // from another partition (for example commercial vs. China or GovCloud) redirect a configured
 // profile. A CLI --region or explicit SDK region still overrides the resulting environment.
 export function resolveRegionDetails(base, profileRegion, profileSource = "profile.region") {
+  base = normalizeEnvironment(base);
   const inherited = base.AWS_REGION || base.AWS_DEFAULT_REGION;
   if (profileRegion && inherited && regionPartition(profileRegion) !== regionPartition(inherited)) {
     return { region: profileRegion, source: profileSource };
@@ -62,6 +66,7 @@ export function resolveRegion(base, profileRegion) {
 }
 
 export function shellEnvironment(base, credentials, profileRegion) {
+  base = normalizeEnvironment(base);
   const region = resolveRegion(base, profileRegion);
   const env = { ...base };
   for (const key of Object.keys(env)) {
@@ -93,6 +98,7 @@ export function parseCredentials(text, now = Date.now()) {
 }
 
 function grantedEnvironment(base, profile, cwd) {
+  base = normalizeEnvironment(base);
   // Resolve the profile region from the same config file and working directory as the session.
   const env = shellEnvironment(base, undefined, discoverProfileRegion(profile, { env: base, cwd }));
   // The trusted credential resolver still needs the user's configured profile files/browser settings.
@@ -112,7 +118,8 @@ export function fetchCredentials(executable, profile, { signal, env = process.en
       // detached keeps Granted and the browser it launches out of Pi's process group, so terminal
       // signals aimed at Pi do not reach them. Only this pid is ever signalled, never the group.
       // Granted resolves a relative AWS_CONFIG_FILE against its cwd; keep it aligned with region discovery.
-      cwd, env: grantedEnvironment(env, profile, cwd), stdio: ["ignore", "pipe", "ignore"], detached: process.platform !== "win32",
+      cwd, env: grantedEnvironment(env, profile, cwd), stdio: ["ignore", "pipe", "ignore"],
+      detached: process.platform !== "win32", windowsHide: true,
     });
     let output = "";
     let bytes = 0;

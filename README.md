@@ -16,7 +16,8 @@ Requirements:
 
 - **[Granted CLI](https://github.com/fwdcloudsec/granted)** must be installed and available on Pi's `PATH`. Configure your IAM Identity Center profiles first. Follow [Granted's setup guide](https://docs.granted.dev/getting-started). This extension does not install Granted or replace its authentication.
 - **Interactive Pi 1.x, version 1.2.0 or newer.** See [Pi version compatibility](#pi-version-compatibility).
-- **macOS or Linux.** Role access requires interactive mode. JSON, print, and RPC modes are unsupported. Status diagnostics remain available wherever the extension loads. Linux support is newer and less widely tested than macOS support.
+- **macOS, Linux, or Windows 11.** Role access requires interactive mode. JSON, print, and RPC modes are unsupported. Status diagnostics remain available wherever the extension loads. Linux and Windows support are less widely tested than macOS support.
+- **On Windows, install native Granted and Git for Windows.** Pi uses Git Bash for `aws_bash`, not PowerShell. Put `granted.exe` on Pi's `PATH`. The extension does not execute `.cmd` or `.bat` wrappers. Windows browser authentication still needs user testing. WSL interoperability is outside this support scope.
 
 In a project with a policy, the extension checks for Granted at startup without running it. If Granted is missing, the extension sends one notification. Role access remains unavailable, but status diagnostics remain available.
 
@@ -295,7 +296,7 @@ Concrete profile names must start with an ASCII letter or digit. They can contai
 - **Awareness without authorization.** Status diagnostics and a model-facing context reminder remain available when role access is disabled. If a task requires an assumed profile but setup or authentication is unavailable, the assistant must stop and report the blocker. It must not substitute ambient credentials, search credential stores, obtain credentials directly through AWS/Granted, or edit AWS policy/profile files. The user manages setup outside Pi, then runs `/reload`. Tasks that do not require an assumed profile can still use plain `bash` with its ambient environment. This guidance is not technical enforcement.
 - **Region selection.** The selected profile's explicit `region` defines its operational default. If `region` is absent, the extension uses `sso_region` from that profile section. Granted's subprocess and `aws_bash` use inherited `AWS_REGION`, then inherited `AWS_DEFAULT_REGION`, then this profile default, then `us-east-1`. If the inherited region and the profile default are in different AWS partitions, the profile default wins. The extension identifies the partition from the region name prefix: `cn-` (China), `us-gov-` (GovCloud), `us-iso-`, `us-isob-`, `us-isof-`, and `eu-isoe-` (isolated regions), and `eusc-` (European Sovereign Cloud). All other regions are in the commercial partition. This rule also applies to the `sso_region` fallback. Precedence within a partition is unchanged. GovCloud and isolated-region support is untested with real accounts. A CLI `--region` or explicit SDK region still wins.
 - **Memory-only state.** The extension never persists credentials or approvals. It never automatically reactivates a role. Granted's own cache is separate.
-- **macOS/Linux, Granted, interactive mode.** This alpha does not support other platforms, credential tools, or non-interactive modes for role access.
+- **macOS/Linux/Windows 11, Granted, interactive mode.** Windows requires native Granted and Git Bash. This alpha does not support other credential tools or non-interactive modes for role access.
 - **Not a sandbox.** See [Known limitations](#known-limitations).
 
 ### Pi version compatibility
@@ -402,6 +403,10 @@ PI_CODING_AGENT_ENTRY=/path/to/pi-coding-agent/dist/index.js npm test
 ```
 
 Without this variable, installed-Pi tests are skipped. Interactive integration tests target Pi 1.2.0. With the variable set, they run on macOS and Linux. They do not run in CI. Run them locally before a release.
+
+Windows CI runs `node --test test/windows.test.js` on Node.js 22.19, 24, and 26. These checks use a native Node executable as fake Granted. They verify subprocess arguments, credential sanitization, private diagnostics, output limits, timeouts, cancellation, and common Windows path guards. The Windows job also installs Pi 1.5.2 and checks credential injection through its Git Bash backend. The existing full suite contains POSIX-only fixtures and does not run on Windows. The shared `pack:check` helper is also Unix-oriented. Windows CI uses `npm pack --dry-run` directly.
+
+Before a Windows release, test real Granted authentication in interactive Pi with Git Bash. Select an allowed profile through `/assume`. Ask Pi to run `aws sts get-caller-identity` through `aws_bash`. Check that the selected identity is correct. Check cancellation during browser login and confirm that the browser stays open. Check `/assume clear` and `/reload`. Never include credentials or private account details in test reports.
 
 Authentication tests use fake Granted executables and credentials in temporary directories. They make no model requests and use no real AWS credentials or role assumptions. Live Granted authentication remains a user-run smoke test. The prototype used Granted 0.38.0 during development.
 
